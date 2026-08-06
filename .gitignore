@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 .venv/
+node_modules/
 .env
 .DS_Store
 .pytest_cache/
@@ -19,6 +20,7 @@ build/
 /data/
 /download
 /local/
+/workspace/
 /run*
 example.py
 results/

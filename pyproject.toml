@@ -41,6 +41,8 @@ dependencies = [
     "numpy",
     "soundfile",
     "librosa",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +60,7 @@ eval = [
 omnivoice-infer = "omnivoice.cli.infer:main"
 omnivoice-infer-batch = "omnivoice.cli.infer_batch:main"
 omnivoice-demo = "omnivoice.cli.demo:main"
+omnivoice-local-engine = "services.local_engine.app.main:main"
 
 [project.urls]
 Homepage = "https://github.com/k2-fsa/OmniVoice"
@@ -93,7 +96,7 @@ constraint-dependencies = [
 ignore = ["F401", "E402", "F403", "F841", "E741"]
 
 [tool.hatch.build.targets.sdist]
-include = ["omnivoice"]
+include = ["omnivoice", "services"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["omnivoice"]
+packages = ["omnivoice", "services"]
