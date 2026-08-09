@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420",
-    "test:studio": "vitest run src/lib/segment-state.test.ts",
+    "test:studio": "vitest run src/lib",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

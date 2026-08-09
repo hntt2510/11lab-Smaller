@@ -119,6 +119,23 @@ class ProviderContractTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.headers["content-type"], "audio/wav")
                 self.assertTrue(response.content.startswith(b"RIFF"))
+                first_output = Path(response.headers["X-Output-Path"])
+                self.assertTrue(first_output.is_file())
+                self.assertEqual(first_output.suffix, ".wav")
+
+                second_response = client.post(
+                    "/generate",
+                    json={"text": "hello again"},
+                    headers={**headers, "Origin": "http://127.0.0.1:1420"},
+                )
+                self.assertEqual(second_response.status_code, 200)
+                second_output = Path(second_response.headers["X-Output-Path"])
+                self.assertNotEqual(first_output, second_output)
+                self.assertTrue(second_output.is_file())
+                exposed = second_response.headers["access-control-expose-headers"]
+                self.assertIn("X-Output-Path", exposed)
+                self.assertIn("X-Provider", exposed)
+                self.assertIn("X-Sampling-Rate", exposed)
 
                 response = client.post(
                     "/queue",

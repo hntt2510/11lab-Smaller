@@ -183,6 +183,7 @@ def create_app(
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["X-Output-Path", "X-Provider", "X-Sampling-Rate"],
     )
     app.state.provider = provider or OmniVoiceProvider()
     app.state.token = token or secrets.token_urlsafe(32)

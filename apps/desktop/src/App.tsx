@@ -369,7 +369,7 @@ function App() {
       speed: segment.speed,
       options: requestSnapshot.options,
     });
-    if (!generated.outputPath) throw new Error("Local engine did not persist the generated WAV");
+    if (!generated.outputPath) throw new Error("Generation succeeded, but the local engine did not expose the persisted output path.");
     const take = await client.createTake("episode-01", {
       segment_id: segment.id,
       output_path: generated.outputPath,
