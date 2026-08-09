@@ -22,6 +22,8 @@ MASTERING_PRESETS: dict[str, dict[str, Any]] = {
     "Short-form / TikTok": {"trim_silence": True, "high_pass": True, "compress": True, "target_rms_db": -14.0},
 }
 
+ASSEMBLY_SAMPLE_RATE = 24_000
+
 
 @dataclass(frozen=True)
 class AudioMetrics:
@@ -58,6 +60,28 @@ class AudioProcessResult:
             "preset": self.preset,
             "metrics": self.metrics.to_dict(),
             "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class AudioAssemblySegment:
+    segment_id: str
+    audio_path: str
+    pause_before_ms: int = 0
+    pause_after_ms: int = 0
+
+
+@dataclass(frozen=True)
+class AudioAssemblyResult:
+    output_path: str
+    duration: float
+    segments: tuple[dict[str, float | str], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "output_path": self.output_path,
+            "duration": self.duration,
+            "segments": list(self.segments),
         }
 
 
@@ -108,6 +132,59 @@ def process_audio(
         preset=preset,
         metrics=metrics,
         warnings=quality_warnings(metrics),
+    )
+
+
+def assemble_audio(
+    segments: Iterable[AudioAssemblySegment],
+    output_path: str | Path,
+    *,
+    sample_rate: int = ASSEMBLY_SAMPLE_RATE,
+) -> AudioAssemblyResult:
+    """Create one WAV from selected takes in script order.
+
+    Every segment contributes, in order: pause-before, its selected take, then
+    pause-after.  This deliberately preserves both canonical pause fields.
+    Input is normalized to mono and the fixed engine-native sample rate before
+    concatenation, so source WAVs with different formats cannot corrupt output.
+    """
+
+    if sample_rate <= 0:
+        raise ValueError("assembly sample rate must be greater than zero")
+
+    parts: list[np.ndarray] = []
+    timeline: list[dict[str, float | str]] = []
+    cursor_frames = 0
+    for segment in segments:
+        if segment.pause_before_ms < 0 or segment.pause_after_ms < 0:
+            raise ValueError("segment pauses must not be negative")
+        audio, source_rate = load_audio(segment.audio_path)
+        if audio.shape[0] == 0:
+            raise ValueError(f"selected take is empty: {segment.audio_path}")
+        normalized = _resample_audio(_to_mono(audio), source_rate, sample_rate)
+        before_frames = int(round(segment.pause_before_ms * sample_rate / 1000))
+        after_frames = int(round(segment.pause_after_ms * sample_rate / 1000))
+        if before_frames:
+            parts.append(np.zeros((before_frames, 1), dtype=np.float32))
+        cursor_frames += before_frames
+        start = cursor_frames / sample_rate
+        parts.append(normalized)
+        cursor_frames += normalized.shape[0]
+        end = cursor_frames / sample_rate
+        timeline.append({"segment_id": segment.segment_id, "start": start, "end": end})
+        if after_frames:
+            parts.append(np.zeros((after_frames, 1), dtype=np.float32))
+        cursor_frames += after_frames
+
+    if not timeline:
+        raise ValueError("at least one selected take is required for assembly")
+    destination = Path(output_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_audio(destination, np.concatenate(parts, axis=0), sample_rate)
+    return AudioAssemblyResult(
+        output_path=str(destination),
+        duration=cursor_frames / sample_rate,
+        segments=tuple(timeline),
     )
 
 
@@ -238,6 +315,22 @@ def add_silence(
     after_audio = np.zeros(shape(after), dtype=np.float32)
     body = audio if audio.ndim == 2 else audio[:, None]
     return np.concatenate((before_audio, body, after_audio), axis=0)
+
+
+def _to_mono(audio: np.ndarray) -> np.ndarray:
+    body = audio if audio.ndim == 2 else audio[:, None]
+    return body.mean(axis=1, keepdims=True, dtype=np.float32).astype(np.float32, copy=False)
+
+
+def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate <= 0:
+        raise ValueError("source audio has an invalid sample rate")
+    if source_rate == target_rate:
+        return audio.astype(np.float32, copy=False)
+    target_length = max(1, int(round(audio.shape[0] * target_rate / source_rate)))
+    source_points = np.arange(audio.shape[0], dtype=np.float64)
+    target_points = np.linspace(0, max(0, audio.shape[0] - 1), target_length, dtype=np.float64)
+    return np.interp(target_points, source_points, audio[:, 0]).astype(np.float32)[:, None]
 
 
 def apply_fades(audio: np.ndarray, sample_rate: int, fade_in: float, fade_out: float) -> np.ndarray:

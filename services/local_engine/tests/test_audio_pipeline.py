@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from services.local_engine.app.main import create_app
 from services.local_engine.app.services.audio_pipeline import (
+    AudioAssemblySegment,
+    assemble_audio,
     export_srt,
     export_mp3,
     load_audio,
@@ -30,6 +32,54 @@ def _write_fixture(path: Path) -> None:
 
 
 class AudioPipelineTest(unittest.TestCase):
+    def test_assembly_keeps_four_dialogue_segments_in_script_order(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = []
+            for index, value in enumerate((0.1, 0.2, 0.3, 0.4), start=1):
+                path = root / f"line-{index}.wav"
+                write_audio(path, np.full((24, 1), value, dtype=np.float32), 24_000)
+                inputs.append(path)
+
+            result = assemble_audio(
+                [AudioAssemblySegment(f"segment-{index}", str(path)) for index, path in enumerate(inputs, start=1)],
+                root / "dialogue.wav",
+            )
+
+            audio, _ = load_audio(result.output_path)
+            self.assertEqual([item["segment_id"] for item in result.segments], ["segment-1", "segment-2", "segment-3", "segment-4"])
+            self.assertAlmostEqual(float(audio[0, 0]), 0.1, places=3)
+            self.assertAlmostEqual(float(audio[24, 0]), 0.2, places=3)
+            self.assertAlmostEqual(float(audio[48, 0]), 0.3, places=3)
+            self.assertAlmostEqual(float(audio[72, 0]), 0.4, places=3)
+
+    def test_assembly_preserves_selected_take_order_pauses_and_sources(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.wav"
+            second = root / "second.wav"
+            final = root / "full.wav"
+            write_audio(first, np.full((100, 1), 0.2, dtype=np.float32), 1_000)
+            write_audio(second, np.full((200, 1), 0.6, dtype=np.float32), 2_000)
+
+            result = assemble_audio([
+                AudioAssemblySegment("segment-1", str(first), pause_after_ms=100),
+                AudioAssemblySegment("segment-2", str(second), pause_before_ms=50),
+            ], final)
+
+            assembled, rate = load_audio(final)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            self.assertEqual(rate, 24_000)
+            self.assertAlmostEqual(result.duration, 0.35, places=3)
+            self.assertEqual([item["segment_id"] for item in result.segments], ["segment-1", "segment-2"])
+            self.assertAlmostEqual(float(result.segments[0]["start"]), 0.0, places=3)
+            self.assertAlmostEqual(float(result.segments[0]["end"]), 0.1, places=3)
+            self.assertAlmostEqual(float(result.segments[1]["start"]), 0.25, places=3)
+            self.assertAlmostEqual(float(result.segments[1]["end"]), 0.35, places=3)
+            self.assertGreater(float(assembled[1000, 0]), 0.1)
+            self.assertGreater(float(assembled[-1, 0]), 0.4)
+
     def test_process_applies_trim_fade_volume_and_silence(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -188,6 +238,23 @@ class AudioPipelineTest(unittest.TestCase):
                     headers=headers,
                 )
                 self.assertEqual(traversal.status_code, 422)
+
+                assembled = client.post(
+                    "/audio/assemble",
+                    json={
+                        "segments": [{"segment_id": "segment-01", "audio_path": str(source), "pause_after_ms": 120}],
+                    },
+                    headers=headers,
+                )
+                self.assertEqual(assembled.status_code, 200)
+                self.assertTrue(Path(assembled.json()["output_path"]).is_file())
+
+                escaped = client.post(
+                    "/audio/assemble",
+                    json={"segments": [{"segment_id": "segment-01", "audio_path": str(Path.home() / "outside.wav")} ]},
+                    headers=headers,
+                )
+                self.assertEqual(escaped.status_code, 422)
 
                 if shutil.which("ffmpeg"):
                     mp3 = client.post(

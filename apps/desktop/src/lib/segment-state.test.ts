@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ScriptSegment, Take } from "./local-engine";
-import { applyStudioPresetToSegment, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./segment-state";
+import { applyStudioPresetToSegment, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./segment-state";
 
 function segment(id: string): ScriptSegment {
   return {
@@ -82,5 +82,35 @@ describe("canonical Studio segment state", () => {
     expect(resolveSelectedTake(selectTakeForSegment(segments, "segment-1", takeB.id)[0], takes)?.output_path).toBe("file-B.wav");
     expect(resolveSelectedTake(segments[1], takes)).toBeNull();
     expect(resolveSelectedTake({ ...segments[1], selected_take: takeA.id }, takes)).toBeNull();
+  });
+
+  it("builds full script inputs from selected takes in script order and reports missing lines", () => {
+    const takeA = take("take-a", "segment-1", "file-A.wav");
+    const takeB = take("take-b", "segment-2", "file-B.wav");
+    const selected = selectTakeForSegment(
+      selectTakeForSegment([segment("segment-1"), segment("segment-2"), segment("segment-3")], "segment-1", takeA.id),
+      "segment-2",
+      takeB.id,
+    );
+    selected[0].pause_after_ms = 180;
+    selected[1].pause_before_ms = 20;
+
+    const assembly = resolveFullScriptAssembly(selected, [takeA, takeB]);
+
+    expect(assembly.sourceTakeIds).toEqual(["take-a", "take-b"]);
+    expect(assembly.segments.map((item) => item.audio_path)).toEqual(["file-A.wav", "file-B.wav"]);
+    expect(assembly.segments[0]).toMatchObject({ pause_after_ms: 180 });
+    expect(assembly.missingSegmentIds).toEqual(["segment-3"]);
+  });
+
+  it("changes the full-script source snapshot when a line selects another take", () => {
+    const takeA = take("take-a", "segment-1", "file-A.wav");
+    const takeB = take("take-b", "segment-1", "file-B.wav");
+    const initial = selectTakeForSegment([segment("segment-1")], "segment-1", takeA.id);
+    const rebuilt = selectTakeForSegment(initial, "segment-1", takeB.id);
+
+    expect(resolveFullScriptAssembly(initial, [takeA, takeB]).sourceTakeIds).toEqual(["take-a"]);
+    expect(resolveFullScriptAssembly(rebuilt, [takeA, takeB]).sourceTakeIds).toEqual(["take-b"]);
+    expect(resolveFullScriptAssembly(rebuilt, [takeA, takeB]).segments[0].audio_path).toBe("file-B.wav");
   });
 });

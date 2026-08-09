@@ -13,13 +13,28 @@ import {
   getLocalEngineClient,
 } from "./lib/local-engine";
 import type { AudioEditOptions } from "./lib/local-engine";
-import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./lib/segment-state";
+import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./lib/segment-state";
 import { WaveformEditor } from "./components/WaveformEditor";
 
 gsap.registerPlugin(useGSAP);
 
 type ViewKey = "home" | "voices" | "studio" | "batch" | "history";
 type RenderStatus = "ready" | "rendering" | "complete";
+type FullScriptStatus = "idle" | "assembling" | "ready" | "unavailable" | "error";
+type FullScriptState = {
+  status: FullScriptStatus;
+  outputPath: string | null;
+  audioUrl: string | null;
+  duration: number | null;
+  builtAt: string | null;
+  sourceTakeIds: string[];
+  timeline: Array<{ segment_id: string; start: number; end: number }>;
+  message: string | null;
+};
+
+const initialFullScriptState: FullScriptState = {
+  status: "idle", outputPath: null, audioUrl: null, duration: null, builtAt: null, sourceTakeIds: [], timeline: [], message: null,
+};
 
 type NavItem = {
   key: ViewKey;
@@ -180,6 +195,8 @@ function App() {
   const [previewAudioPath, setPreviewAudioPath] = useState<string | null>(null);
   const [previewedSegmentId, setPreviewedSegmentId] = useState<string | null>(null);
   const [previewedTakeId, setPreviewedTakeId] = useState<string | null>(null);
+  const [fullScript, setFullScript] = useState<FullScriptState>(initialFullScriptState);
+  const [fullPreviewSeekRequest, setFullPreviewSeekRequest] = useState<{ id: number; seconds: number } | null>(null);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [studioPresets, setStudioPresets] = useState<Record<string, StudioPreset> | null>(null);
   const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null);
@@ -238,6 +255,12 @@ function App() {
   }, [previewAudioUrl]);
 
   useEffect(() => {
+    return () => {
+      if (fullScript.audioUrl) URL.revokeObjectURL(fullScript.audioUrl);
+    };
+  }, [fullScript.audioUrl]);
+
+  useEffect(() => {
     const client = getLocalEngineClient();
     if (!client) return;
 
@@ -273,6 +296,14 @@ function App() {
     ? voiceProfiles.find((profile) => profile.id === effectiveVoiceId) ?? null
     : null;
   const selectedTake = resolveSelectedTake(selectedSegment, takes);
+  const fullScriptAssembly = resolveFullScriptAssembly(scriptSegments, takes);
+  const fullScriptSignature = fullScriptAssembly.segments
+    .map((segment, index) => `${fullScriptAssembly.sourceTakeIds[index]}:${segment.audio_path}:${segment.pause_before_ms}:${segment.pause_after_ms}`)
+    .join("|");
+  const isFullScriptCurrent = fullScript.status === "ready"
+    && fullScript.sourceTakeIds.join("|") === fullScriptAssembly.sourceTakeIds.join("|")
+    && fullScriptAssembly.missingSegmentIds.length === 0;
+  const fullScriptAudioUrl = isFullScriptCurrent ? fullScript.audioUrl : null;
   const isSelectedTakePreviewed = Boolean(selectedTake)
     && previewedSegmentId === selectedSegmentId
     && previewedTakeId === selectedTake.id;
@@ -309,6 +340,46 @@ function App() {
     };
   }, [selectedSegmentId, selectedSegment?.id, selectedTake?.id, selectedTake?.output_path]);
 
+  useEffect(() => {
+    const client = getLocalEngineClient();
+    if (fullScriptAssembly.missingSegmentIds.length) {
+      setFullScript({
+        ...initialFullScriptState,
+        status: "unavailable",
+        message: `Full preview unavailable: ${fullScriptAssembly.missingSegmentIds.join(", ")} has no selected Take.`,
+      });
+      return;
+    }
+    if (!client) {
+      setFullScript({ ...initialFullScriptState, status: "unavailable", message: "Connect the local engine to assemble the full script." });
+      return;
+    }
+
+    let cancelled = false;
+    setFullScript({ ...initialFullScriptState, status: "assembling", sourceTakeIds: fullScriptAssembly.sourceTakeIds });
+    client.assembleAudio(fullScriptAssembly.segments)
+      .then(async (assembled) => ({ assembled, blob: await client.fetchAudio(assembled.output_path) }))
+      .then(({ assembled, blob }) => {
+        if (cancelled) return;
+        setFullScript({
+          status: "ready",
+          outputPath: assembled.output_path,
+          audioUrl: URL.createObjectURL(blob),
+          duration: assembled.duration,
+          builtAt: new Date().toISOString(),
+          sourceTakeIds: fullScriptAssembly.sourceTakeIds,
+          timeline: assembled.segments,
+          message: null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: "Full script assembly failed." });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fullScriptSignature, fullScriptAssembly.missingSegmentIds.join("|")]);
+
   const dialogueSpeakers = Array.from(new Set(
     scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
   ));
@@ -325,6 +396,13 @@ function App() {
   const selectTake = contextSafe((take: Take) => {
     if (take.segment_id !== selectedSegmentId) return;
     setScriptSegments((current) => selectTakeForSegment(current, take.segment_id, take.id));
+  });
+
+  const selectScriptSegment = contextSafe((segmentId: string) => {
+    setSelectedSegmentId(segmentId);
+    if (!isFullScriptCurrent) return;
+    const boundary = fullScript.timeline.find((segment) => segment.segment_id === segmentId);
+    if (boundary) setFullPreviewSeekRequest((current) => ({ id: (current?.id ?? 0) + 1, seconds: boundary.start }));
   });
 
   const applyStudioPreset = contextSafe((emotion: string) => {
@@ -538,6 +616,20 @@ function App() {
     }
   });
 
+  const exportFullScriptWav = contextSafe(async () => {
+    const client = getLocalEngineClient();
+    if (!client || !isFullScriptCurrent || !fullScript.outputPath) {
+      setToast("Full script preview is unavailable");
+      return;
+    }
+    try {
+      downloadBlob(await client.fetchAudio(fullScript.outputPath), "full-script.wav");
+      setToast("Full script WAV downloaded");
+    } catch {
+      setToast("Full script WAV export failed");
+    }
+  });
+
   const exportSrt = contextSafe(async () => {
     const client = getLocalEngineClient();
     if (!client) {
@@ -633,16 +725,16 @@ function App() {
             </div>
             <div className="hero-actions">
               <button className="outline-button" type="button" onClick={saveProject}>Save project</button>
-              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress)}>
+              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress) || fullScript.status === "assembling"}>
                 <span className="button-spark">+</span>
-                {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : "Generate all"}
+                {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : fullScript.status === "assembling" ? "Assembling full script" : "Generate all"}
               </button>
             </div>
           </section>
 
           {activeView === "studio" ? (
             <StudioView
-              onSelect={setSelectedSegmentId}
+              onSelect={selectScriptSegment}
               selectedSegmentId={selectedSegmentId}
               renderStatus={renderStatus}
               onGenerate={generateTake}
@@ -658,7 +750,7 @@ function App() {
               speakerVoiceMap={speakerVoiceMap}
               selectedNarratorVoiceId={selectedNarratorVoiceId}
               voices={voiceProfiles}
-              isGeneratingAll={Boolean(generateAllProgress)}
+              isGeneratingAll={Boolean(generateAllProgress) || fullScript.status === "assembling"}
               onModeChange={(mode) => { setGenerationMode(mode); setToast("Mode changed. Parse the source to apply it."); }}
               onSpeakerVoiceChange={(speaker, voiceId) => setSpeakerVoiceMap((current) => ({ ...current, [speaker]: voiceId }))}
               onNarratorVoiceChange={selectVoice}
@@ -666,6 +758,10 @@ function App() {
               sourceDraft={sourceDraft}
               onSourceChange={setSourceDraft}
               onParse={parseDraft}
+              fullScript={fullScript}
+              fullScriptAudioUrl={fullScriptAudioUrl}
+              fullPreviewSeekRequest={fullPreviewSeekRequest}
+              onExportFullScriptWav={exportFullScriptWav}
             />
           ) : (
             <OverviewView
@@ -728,6 +824,10 @@ function StudioView({
   sourceDraft,
   onSourceChange,
   onParse,
+  fullScript,
+  fullScriptAudioUrl,
+  fullPreviewSeekRequest,
+  onExportFullScriptWav,
 }: {
   onSelect: (id: string) => void;
   selectedSegmentId: string | null;
@@ -753,6 +853,10 @@ function StudioView({
   sourceDraft: string;
   onSourceChange: (source: string) => void;
   onParse: () => void;
+  fullScript: FullScriptState;
+  fullScriptAudioUrl: string | null;
+  fullPreviewSeekRequest: { id: number; seconds: number } | null;
+  onExportFullScriptWav: () => void;
 }) {
   return (
     <div className="studio-grid">
@@ -823,8 +927,29 @@ function StudioView({
         </div>
         <div className="render-meter" />
       </section>
+      <FullScriptPreview
+        fullScript={fullScript}
+        audioUrl={fullScriptAudioUrl}
+        seekRequest={fullPreviewSeekRequest}
+        onExportWav={onExportFullScriptWav}
+      />
     </div>
   );
+}
+
+function FullScriptPreview({ fullScript, audioUrl, seekRequest, onExportWav }: { fullScript: FullScriptState; audioUrl: string | null; seekRequest: { id: number; seconds: number } | null; onExportWav: () => void }) {
+  const status = fullScript.status === "assembling"
+    ? "Assembling full script"
+    : fullScript.status === "ready" && audioUrl
+      ? "Full preview ready"
+      : fullScript.message ?? "Generate every line to create a full preview.";
+  return <section className="full-script-panel reveal-card">
+    <div className="full-script-head"><div><span className="tiny-label">TIMELINE / FULL SCRIPT</span><strong>Full Script Preview</strong></div><span className={`render-state ${fullScript.status === "assembling" ? "rendering" : audioUrl ? "complete" : ""}`}><i />{status}</span></div>
+    {audioUrl ? <>
+      <WaveformEditor audioUrl={audioUrl} readOnly seekRequest={seekRequest} onExportWav={onExportWav} />
+      <div className="full-script-meta"><span>{`00:00 / ${formatSegmentDuration(fullScript.duration)}`}</span><span>{`Generated from: ${fullScript.sourceTakeIds.length} / ${fullScript.timeline.length} selected lines`}</span></div>
+    </> : <div className="full-script-empty">{status}</div>}
+  </section>;
 }
 
 function GenerationModePanel({ mode, segments, speakerVoiceMap, selectedNarratorVoiceId, voices, isGenerating, onModeChange, onSpeakerVoiceChange, onNarratorVoiceChange, onGenerateAll }: { mode: GenerationMode; segments: ScriptSegment[]; speakerVoiceMap: Record<string, string>; selectedNarratorVoiceId: string | null; voices: VoiceProfile[]; isGenerating: boolean; onModeChange: (mode: GenerationMode) => void; onSpeakerVoiceChange: (speaker: string, voiceId: string) => void; onNarratorVoiceChange: (voiceId: string) => void; onGenerateAll: () => void }) {

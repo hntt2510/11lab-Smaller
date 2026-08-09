@@ -125,6 +125,19 @@ export type Take = {
   created_at: string;
 };
 
+export type AudioAssemblySegment = {
+  segment_id: string;
+  audio_path: string;
+  pause_before_ms: number;
+  pause_after_ms: number;
+};
+
+export type AudioAssemblyResult = {
+  output_path: string;
+  duration: number;
+  segments: Array<{ segment_id: string; start: number; end: number }>;
+};
+
 export type GenerationMode = "dialogue" | "single_narrator";
 
 type EngineBootstrap = {
@@ -289,6 +302,13 @@ export class LocalEngineClient {
     return this.request<AudioQualityResult>("/audio/quality", {
       method: "POST",
       body: JSON.stringify({ path, expected_duration: expectedDuration }),
+    });
+  }
+
+  assembleAudio(segments: AudioAssemblySegment[], outputFilename?: string): Promise<AudioAssemblyResult> {
+    return this.request<AudioAssemblyResult>("/audio/assemble", {
+      method: "POST",
+      body: JSON.stringify({ segments, output_filename: outputFilename }),
     });
   }
 

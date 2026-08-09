@@ -1,4 +1,4 @@
-import type { GenerationMode, ScriptSegment, StudioPreset, Take } from "./local-engine";
+import type { AudioAssemblySegment, GenerationMode, ScriptSegment, StudioPreset, Take } from "./local-engine";
 
 export type EditableSegmentPatch = Partial<Pick<ScriptSegment,
   "speed" | "duration" | "guidance" | "pause_before_ms" | "pause_after_ms" | "volume"
@@ -27,6 +27,30 @@ export function selectTakeForSegment(
 export function resolveSelectedTake(segment: ScriptSegment | null, takes: Take[]): Take | null {
   if (!segment?.selected_take) return null;
   return takes.find((take) => take.id === segment.selected_take && take.segment_id === segment.id) ?? null;
+}
+
+export function resolveFullScriptAssembly(
+  segments: ScriptSegment[],
+  takes: Take[],
+): { segments: AudioAssemblySegment[]; sourceTakeIds: string[]; missingSegmentIds: string[] } {
+  const assemblySegments: AudioAssemblySegment[] = [];
+  const sourceTakeIds: string[] = [];
+  const missingSegmentIds: string[] = [];
+  for (const segment of segments) {
+    const take = resolveSelectedTake(segment, takes);
+    if (!take) {
+      missingSegmentIds.push(segment.id);
+      continue;
+    }
+    sourceTakeIds.push(take.id);
+    assemblySegments.push({
+      segment_id: segment.id,
+      audio_path: take.output_path,
+      pause_before_ms: segment.pause_before_ms,
+      pause_after_ms: segment.pause_after_ms,
+    });
+  }
+  return { segments: assemblySegments, sourceTakeIds, missingSegmentIds };
 }
 
 export function applyStudioPresetToSegment(

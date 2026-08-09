@@ -18,6 +18,8 @@ from .providers.omnivoice_provider import OmniVoiceProvider
 from .queue import RenderQueue
 from .services.audio_pipeline import (
     MASTERING_PRESETS,
+    AudioAssemblySegment,
+    assemble_audio,
     export_mp3,
     export_srt,
     process_audio,
@@ -159,6 +161,22 @@ class AudioQualityRequest(BaseModel):
 
     path: str = Field(min_length=1)
     expected_duration: float | None = Field(default=None, gt=0)
+
+
+class AudioAssemblySegmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_id: str = Field(min_length=1)
+    audio_path: str = Field(min_length=1)
+    pause_before_ms: int = Field(default=0, ge=0)
+    pause_after_ms: int = Field(default=0, ge=0)
+
+
+class AudioAssemblyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segments: list[AudioAssemblySegmentRequest] = Field(min_length=1)
+    output_filename: str | None = None
 
 
 class SrtExportRequest(BaseModel):
@@ -592,6 +610,30 @@ def create_app(
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/audio/assemble", dependencies=[Depends(require_token)])
+    def assemble_audio_route(
+        payload: AudioAssemblyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        workspace: Path | None = request.app.state.workspace
+        if workspace is None:
+            raise HTTPException(status_code=503, detail="Workspace is disabled")
+        try:
+            selected_segments = [
+                AudioAssemblySegment(
+                    segment_id=segment.segment_id,
+                    audio_path=str(_resolve_workspace_audio_path(workspace, segment.audio_path)),
+                    pause_before_ms=segment.pause_before_ms,
+                    pause_after_ms=segment.pause_after_ms,
+                )
+                for segment in payload.segments
+            ]
+            output_name = payload.output_filename or f"full-script-{secrets.token_hex(8)}.wav"
+            output_path = _resolve_workspace_path(workspace, output_name, ".wav")
+            return assemble_audio(selected_segments, output_path).to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/audio/export/srt", dependencies=[Depends(require_token)])
     def export_srt_route(
         payload: SrtExportRequest,
@@ -667,6 +709,15 @@ def _resolve_workspace_path(workspace: Path, filename: str, suffix: str) -> Path
         raise ValueError("output path must stay inside the workspace")
     if candidate.suffix.lower() != suffix:
         raise ValueError(f"output path must use the {suffix} extension")
+    return candidate
+
+
+def _resolve_workspace_audio_path(workspace: Path, path: str) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    if candidate == workspace or not candidate.is_relative_to(workspace):
+        raise ValueError("audio path must stay inside the workspace")
+    if candidate.suffix.lower() != ".wav" or not candidate.is_file():
+        raise ValueError("selected take must be an existing workspace WAV file")
     return candidate
 
 

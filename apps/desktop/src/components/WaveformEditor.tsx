@@ -11,6 +11,8 @@ export type WaveformRegion = {
 
 type WaveformEditorProps = {
   audioUrl: string | null;
+  readOnly?: boolean;
+  seekRequest?: { id: number; seconds: number } | null;
   onPlayingChange?: (playing: boolean) => void;
   onRegionChange?: (region: WaveformRegion | null) => void;
   onProcess?: (options: Omit<AudioEditOptions, "source_path">) => void;
@@ -31,6 +33,8 @@ function formatTime(seconds: number): string {
 
 export function WaveformEditor({
   audioUrl,
+  readOnly = false,
+  seekRequest,
   onPlayingChange,
   onRegionChange,
   onProcess,
@@ -134,6 +138,11 @@ export function WaveformEditor({
     };
   }, [audioUrl, onPlayingChange, onRegionChange]);
 
+  useEffect(() => {
+    if (!seekRequest || !waveSurferRef.current || duration <= 0) return;
+    waveSurferRef.current.seekTo(Math.max(0, Math.min(1, seekRequest.seconds / duration)));
+  }, [duration, seekRequest]);
+
   const togglePlay = () => {
     if (!waveSurferRef.current || !audioUrl) {
       setMessage("Generate a take to activate the waveform");
@@ -201,9 +210,9 @@ export function WaveformEditor({
             }}
           />
         </label>
-        <button className="replace-take" onClick={onReplaceTake} type="button">Replace take</button>
+        {!readOnly && <button className="replace-take" onClick={onReplaceTake} type="button">Replace take</button>}
       </div>
-      <div className="wave-editor-editing">
+      {!readOnly && <div className="wave-editor-editing">
         <label>Fade in <input type="number" min="0" max="5" step="0.05" value={fadeIn} onChange={(event) => setFadeIn(Number(event.target.value))} />s</label>
         <label>Fade out <input type="number" min="0" max="5" step="0.05" value={fadeOut} onChange={(event) => setFadeOut(Number(event.target.value))} />s</label>
         <label>Pause before <input type="number" min="0" max="10" step="0.05" value={silenceBefore} onChange={(event) => setSilenceBefore(Number(event.target.value))} />s</label>
@@ -219,13 +228,13 @@ export function WaveformEditor({
         </select></label>
         <button className="apply-edit" onClick={applyEdit} type="button" disabled={!region}>Apply edit</button>
         <span className="edit-duration">{formatTime(selectedDuration)} selected</span>
-      </div>
+      </div>}
       <div className="wave-editor-footer">
         <span>{message}</span>
         <div>
-          <button type="button" onClick={onQualityCheck} disabled={!audioUrl}>Quality check</button>
+          {!readOnly && <button type="button" onClick={onQualityCheck} disabled={!audioUrl}>Quality check</button>}
           <button type="button" onClick={onExportWav} disabled={!audioUrl}>Export WAV</button>
-          <button type="button" onClick={onExportMp3} disabled={!audioUrl}>Export MP3</button>
+          {!readOnly && <button type="button" onClick={onExportMp3} disabled={!audioUrl}>Export MP3</button>}
         </div>
       </div>
     </div>
