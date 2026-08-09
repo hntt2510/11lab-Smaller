@@ -170,9 +170,20 @@ export class LocalEngineClient {
       },
     });
     if (!response.ok) {
-      throw new Error(`Local engine request failed (${response.status})`);
+      throw new Error(await this.errorFromResponse(response));
     }
     return response.json() as Promise<T>;
+  }
+
+  private async errorFromResponse(response: Response): Promise<string> {
+    let detail: string | undefined;
+    try {
+      const body = await response.json() as { detail?: unknown };
+      if (typeof body.detail === "string" && body.detail.trim()) detail = body.detail;
+    } catch {
+      // Preserve a status-only error when the local engine did not return JSON.
+    }
+    return `Local engine request failed (${response.status})${detail ? `: ${detail}` : ""}`;
   }
 
   health(): Promise<EngineHealth> {
@@ -327,7 +338,7 @@ export class LocalEngineClient {
       headers: { Authorization: `Bearer ${this.token}` },
     });
     if (!response.ok) {
-      throw new Error(`Audio download failed (${response.status})`);
+      throw new Error(await this.errorFromResponse(response));
     }
     return response.blob();
   }

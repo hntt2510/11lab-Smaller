@@ -132,4 +132,17 @@ describe("canonical Studio segment state", () => {
       ["A", "a-1.wav"], ["B", "b-2.wav"], ["A", "a-3.wav"],
     ]);
   });
+
+  it("uses each selected Take output path for a four-line narration assembly", () => {
+    const takes = ["1", "2", "3", "4"].map((id) => take(`take-${id}`, `segment-${id}`, `generated-${id}.wav`));
+    const segments = takes.reduce(
+      (current, selected) => selectTakeForSegment(current, selected.segment_id, selected.id),
+      takes.map((selected) => segment(selected.segment_id)),
+    );
+
+    const assembly = resolveFullScriptAssembly(segments, takes);
+
+    expect(assembly.segments).toHaveLength(4);
+    expect(assembly.segments.map((item) => item.audio_path)).toEqual(takes.map((selected) => selected.output_path));
+  });
 });

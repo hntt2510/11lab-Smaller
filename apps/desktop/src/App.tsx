@@ -360,26 +360,46 @@ function App() {
       return;
     }
 
+    const assemblyPayload = fullScriptAssembly.segments.map((segment, index) => ({
+      project_id: "episode-01",
+      segment_id: segment.segment_id,
+      take_id: fullScriptAssembly.sourceTakeIds[index],
+      audio_path: segment.audio_path,
+      pause_before_ms: segment.pause_before_ms,
+      pause_after_ms: segment.pause_after_ms,
+    }));
+    console.info("Assembling narration from selected takes", assemblyPayload);
     let cancelled = false;
     setFullScript({ ...initialFullScriptState, status: "assembling", sourceTakeIds: fullScriptAssembly.sourceTakeIds });
-    client.assembleAudio(fullScriptAssembly.segments)
-      .then(async (assembled) => ({ assembled, blob: await client.fetchAudio(assembled.output_path) }))
-      .then(({ assembled, blob }) => {
-        if (cancelled) return;
-        setFullScript({
-          status: "ready",
-          outputPath: assembled.output_path,
-          audioUrl: URL.createObjectURL(blob),
-          duration: assembled.duration,
-          builtAt: new Date().toISOString(),
-          sourceTakeIds: fullScriptAssembly.sourceTakeIds,
-          timeline: assembled.segments,
-          message: null,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: "Narration assembly failed." });
+    void (async () => {
+      let assembled;
+      try {
+        assembled = await client.assembleAudio(fullScriptAssembly.segments);
+      } catch (error) {
+        console.error("Narration assembly failed", { error, assemblyPayload });
+        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: `Narration assembly failed: ${error instanceof Error ? error.message : "Unknown error"}` });
+        return;
+      }
+      let blob: Blob;
+      try {
+        blob = await client.fetchAudio(assembled.output_path);
+      } catch (error) {
+        console.error("Assembled narration fetch failed", { error, assemblyPayload, outputPath: assembled.output_path });
+        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: `Narration was created but the final WAV could not be loaded: ${error instanceof Error ? error.message : "Unknown error"}` });
+        return;
+      }
+      if (cancelled) return;
+      setFullScript({
+        status: "ready",
+        outputPath: assembled.output_path,
+        audioUrl: URL.createObjectURL(blob),
+        duration: assembled.duration,
+        builtAt: new Date().toISOString(),
+        sourceTakeIds: fullScriptAssembly.sourceTakeIds,
+        timeline: assembled.segments,
+        message: null,
       });
+    })();
     return () => {
       cancelled = true;
     };

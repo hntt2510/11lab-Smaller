@@ -278,7 +278,7 @@ def create_app(
         }
         workspace: Path | None = request.app.state.workspace
         if workspace is not None:
-            output_path = workspace / f"generated-{secrets.token_hex(8)}.wav"
+            output_path = (workspace.expanduser().resolve() / f"generated-{secrets.token_hex(8)}.wav").resolve()
             output_path.write_bytes(wav_bytes)
             headers["X-Output-Path"] = str(output_path)
 
@@ -706,6 +706,7 @@ def create_app(
 
 
 def _resolve_workspace_path(workspace: Path, filename: str, suffix: str) -> Path:
+    workspace = workspace.expanduser().resolve()
     candidate = (workspace / filename).resolve()
     if candidate == workspace or not candidate.is_relative_to(workspace):
         raise ValueError("output path must stay inside the workspace")
@@ -715,6 +716,7 @@ def _resolve_workspace_path(workspace: Path, filename: str, suffix: str) -> Path
 
 
 def _resolve_workspace_audio_path(workspace: Path, path: str) -> Path:
+    workspace = workspace.expanduser().resolve()
     candidate = Path(path).expanduser().resolve()
     if candidate == workspace or not candidate.is_relative_to(workspace):
         raise ValueError("audio path must stay inside the workspace")

@@ -34,4 +34,14 @@ describe("LocalEngineClient.generate", () => {
       body: JSON.stringify({ segments: [{ segment_id: "segment-01", audio_path: "C:/workspace/take-b.wav", pause_before_ms: 0, pause_after_ms: 120 }], output_filename: undefined }),
     }));
   });
+
+  it("includes a backend error detail in failed local-engine requests", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      detail: "selected take must be an existing workspace WAV file",
+    }), { status: 422 })));
+
+    await expect(new LocalEngineClient("http://127.0.0.1:8000", "token").assembleAudio([])).rejects.toThrow(
+      "Local engine request failed (422): selected take must be an existing workspace WAV file",
+    );
+  });
 });

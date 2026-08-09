@@ -32,6 +32,46 @@ def _write_fixture(path: Path) -> None:
 
 
 class AudioPipelineTest(unittest.TestCase):
+    def test_generated_wavs_assemble_through_the_real_runtime_contract(self):
+        with TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve()
+            store = ProjectStore(workspace)
+            with TestClient(create_app(FakeProvider(), token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                generated_paths: list[Path] = []
+                for text in ("one", "two", "three", "four"):
+                    response = client.post("/generate", json={"text": text}, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    path = Path(response.headers["X-Output-Path"])
+                    self.assertTrue(path.is_absolute())
+                    self.assertEqual(path, path.resolve())
+                    self.assertTrue(path.is_relative_to(workspace))
+                    self.assertTrue(path.is_file())
+                    load_audio(path)
+                    downloaded = client.get("/audio/file", params={"path": str(path)}, headers=headers)
+                    self.assertEqual(downloaded.status_code, 200)
+                    self.assertEqual(downloaded.headers["content-type"], "audio/wav")
+                    generated_paths.append(path)
+
+                assembled = client.post(
+                    "/audio/assemble",
+                    json={"segments": [
+                        {"segment_id": f"segment-{index:02d}", "audio_path": str(path), "pause_before_ms": 0, "pause_after_ms": 100 if index < 4 else 0}
+                        for index, path in enumerate(generated_paths, start=1)
+                    ]},
+                    headers=headers,
+                )
+                self.assertEqual(assembled.status_code, 200)
+                result = assembled.json()
+                output_path = Path(result["output_path"])
+                self.assertTrue(output_path.is_file())
+                self.assertTrue(output_path.name.startswith("narration-"))
+                self.assertEqual([item["segment_id"] for item in result["segments"]], ["segment-01", "segment-02", "segment-03", "segment-04"])
+                self.assertGreater(result["duration"], 4 * (16 / 24_000))
+                final_download = client.get("/audio/file", params={"path": str(output_path)}, headers=headers)
+                self.assertEqual(final_download.status_code, 200)
+                self.assertEqual(final_download.headers["content-type"], "audio/wav")
+
     def test_assembly_keeps_four_dialogue_segments_in_script_order(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
