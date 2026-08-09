@@ -44,4 +44,15 @@ describe("LocalEngineClient.generate", () => {
       "Local engine request failed (422): selected take must be an existing workspace WAV file",
     );
   });
+
+  it("hydrates a typed persisted project document", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: "episode-01", name: "Night signal", source: "[calm] Hello.", segments: [], pronunciation_entries: [],
+      generation_mode: "single_narrator", speaker_voice_map: {}, selected_narrator_voice_id: "voice-1", updated_at: "2026-08-09T00:00:00Z",
+    }), { status: 200 })));
+
+    const project = await new LocalEngineClient("http://127.0.0.1:8000", "token").getProject("episode-01");
+
+    expect(project).toMatchObject({ id: "episode-01", generation_mode: "single_narrator", selected_narrator_voice_id: "voice-1" });
+  });
 });

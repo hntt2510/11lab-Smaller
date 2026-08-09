@@ -128,6 +128,20 @@ export type Take = {
   created_at: string;
 };
 
+export type ProjectDocument = {
+  id: string;
+  name: string;
+  source: string;
+  segments: ScriptSegment[];
+  pronunciation_entries: Record<string, unknown>[];
+  generation_mode: GenerationMode;
+  speaker_voice_map: Record<string, string>;
+  selected_narrator_voice_id: string | null;
+  updated_at: string;
+};
+
+export type ProjectSavePayload = Omit<ProjectDocument, "id" | "updated_at">;
+
 export type AudioAssemblySegment = {
   segment_id: string;
   audio_path: string;
@@ -257,19 +271,15 @@ export class LocalEngineClient {
     return response.json() as Promise<VoiceProfile>;
   }
 
-  saveProject(projectId: string, payload: {
-    name: string;
-    source: string;
-    segments: ScriptSegment[];
-    pronunciation_entries?: Record<string, unknown>[];
-    generation_mode: GenerationMode;
-    speaker_voice_map: Record<string, string>;
-    selected_narrator_voice_id?: string | null;
-  }): Promise<Record<string, unknown>> {
-    return this.request<Record<string, unknown>>(`/projects/${encodeURIComponent(projectId)}`, {
+  saveProject(projectId: string, payload: ProjectSavePayload): Promise<ProjectDocument> {
+    return this.request<ProjectDocument>(`/projects/${encodeURIComponent(projectId)}`, {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+  }
+
+  getProject(projectId: string): Promise<ProjectDocument> {
+    return this.request<ProjectDocument>(`/projects/${encodeURIComponent(projectId)}`);
   }
 
   createTake(projectId: string, payload: {

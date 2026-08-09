@@ -6,6 +6,7 @@ import {
   EngineHealth,
   GenerationMode,
   ReferenceAnalysis,
+  ProjectSavePayload,
   ScriptSegment,
   StudioPreset,
   Take,
@@ -20,6 +21,8 @@ gsap.registerPlugin(useGSAP);
 
 type ViewKey = "home" | "voices" | "studio" | "batch" | "history";
 type RenderStatus = "ready" | "rendering" | "complete";
+type HydrationStatus = "loading" | "hydrated" | "new-project" | "error";
+const CURRENT_PROJECT_ID = "episode-01";
 type FullScriptStatus = "idle" | "assembling" | "ready" | "unavailable" | "error";
 type FullScriptState = {
   status: FullScriptStatus;
@@ -206,7 +209,28 @@ function App() {
     model_loaded: false,
     queue_enabled: false,
   });
+  const [hydrationStatus, setHydrationStatus] = useState<HydrationStatus>("loading");
+  const canonicalProjectRef = useRef<ProjectSavePayload>({
+    name: "Night signal", source: scriptSource, segments: initialSegments, pronunciation_entries: [],
+    generation_mode: "single_narrator", speaker_voice_map: {}, selected_narrator_voice_id: null,
+  });
   const engineOnline = engineHealth.status === "ok";
+
+  canonicalProjectRef.current = {
+    name: "Night signal",
+    source: sourceDraft,
+    segments: scriptSegments,
+    pronunciation_entries: [],
+    generation_mode: generationMode,
+    speaker_voice_map: speakerVoiceMap,
+    selected_narrator_voice_id: selectedNarratorVoiceId,
+  };
+
+  const persistProject = async (payload = canonicalProjectRef.current) => {
+    const client = getLocalEngineClient();
+    if (!client) throw new Error("Local engine is unavailable");
+    return client.saveProject(CURRENT_PROJECT_ID, payload);
+  };
 
   const { contextSafe } = useGSAP(
     () => {
@@ -288,6 +312,52 @@ function App() {
     client.listVoices().then(setVoiceProfiles).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    const client = getLocalEngineClient();
+    if (!client) return;
+    let mounted = true;
+    setHydrationStatus("loading");
+    void (async () => {
+      try {
+        const [voices, project] = await Promise.all([client.listVoices(), client.getProject(CURRENT_PROJECT_ID)]);
+        const restoredTakes = await client.listTakes(CURRENT_PROJECT_ID);
+        if (!mounted) return;
+        setVoiceProfiles(voices);
+        setSourceDraft(project.source);
+        setScriptSegments(project.segments);
+        setGenerationMode(project.generation_mode);
+        setSpeakerVoiceMap(project.speaker_voice_map);
+        setSelectedNarratorVoiceId(project.selected_narrator_voice_id);
+        setTakes(restoredTakes);
+        setSelectedSegmentId(project.segments[0]?.id ?? null);
+        setHydrationStatus("hydrated");
+      } catch (error) {
+        if (!mounted) return;
+        if (error instanceof Error && error.message.startsWith("Local engine request failed (404)")) {
+          setSourceDraft("");
+          setScriptSegments([]);
+          setSpeakerVoiceMap({});
+          setSelectedNarratorVoiceId(null);
+          setTakes([]);
+          setSelectedSegmentId(null);
+          setHydrationStatus("new-project");
+          return;
+        }
+        setHydrationStatus("error");
+        setToast(error instanceof Error ? `Project recovery failed: ${error.message}` : "Project recovery failed");
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (hydrationStatus !== "hydrated" && hydrationStatus !== "new-project") return;
+    const timer = window.setTimeout(() => {
+      void persistProject().catch(() => setToast("Project autosave failed"));
+    }, 750);
+    return () => window.clearTimeout(timer);
+  }, [hydrationStatus, sourceDraft, scriptSegments, generationMode, speakerVoiceMap, selectedNarratorVoiceId]);
+
   const selectedSegment = selectedSegmentId
     ? scriptSegments.find((segment) => segment.id === selectedSegmentId) ?? null
     : null;
@@ -334,7 +404,7 @@ function App() {
         setPreviewAudioUrl(URL.createObjectURL(blob));
       })
       .catch(() => {
-        if (!cancelled) setToast("Selected take audio is unavailable");
+        if (!cancelled) setToast("Selected Take audio is missing");
       });
     return () => {
       cancelled = true;
@@ -342,6 +412,7 @@ function App() {
   }, [selectedSegmentId, selectedSegment?.id, selectedTake?.id, selectedTake?.output_path]);
 
   useEffect(() => {
+    if (hydrationStatus === "loading") return;
     const client = getLocalEngineClient();
     if (generationMode !== "single_narrator") {
       setFullScript(initialFullScriptState);
@@ -403,7 +474,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [generationMode, fullScriptSignature, fullScriptAssembly.missingSegmentIds.join("|")]);
+  }, [hydrationStatus, generationMode, fullScriptSignature, fullScriptAssembly.missingSegmentIds.join("|")]);
 
   const dialogueSpeakers = Array.from(new Set(
     scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
@@ -420,7 +491,11 @@ function App() {
 
   const selectTake = contextSafe((take: Take) => {
     setSelectedSegmentId(take.segment_id);
-    setScriptSegments((current) => selectTakeForSegment(current, take.segment_id, take.id));
+    const segments = selectTakeForSegment(canonicalProjectRef.current.segments, take.segment_id, take.id);
+    const project = { ...canonicalProjectRef.current, segments };
+    canonicalProjectRef.current = project;
+    setScriptSegments(segments);
+    void persistProject(project).catch((error) => setToast(`Selected Take save failed: ${error instanceof Error ? error.message : "Unknown error"}`));
   });
 
   const selectScriptSegment = contextSafe((segmentId: string) => {
@@ -480,23 +555,11 @@ function App() {
   });
 
   const saveProject = contextSafe(async () => {
-    const client = getLocalEngineClient();
-    if (!client) {
-      setToast("Project saved locally in this preview");
-      return;
-    }
     try {
-      await client.saveProject("episode-01", {
-        name: "Night signal",
-        source: sourceDraft,
-        segments: scriptSegments,
-        generation_mode: generationMode,
-        speaker_voice_map: speakerVoiceMap,
-        selected_narrator_voice_id: selectedNarratorVoiceId,
-      });
-      setToast("Project autosaved to the local workspace");
-    } catch {
-      setToast("Autosave is unavailable; keeping the local draft");
+      await persistProject();
+      setToast("Project saved");
+    } catch (error) {
+      setToast(`Project save failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   });
 
@@ -534,9 +597,17 @@ function App() {
       request_snapshot: requestSnapshot,
     });
     setTakes((current) => [...current, take]);
-    setScriptSegments((current) => current.map((item) => item.id === segment.id
+    const selectedSegments = canonicalProjectRef.current.segments.map((item) => item.id === segment.id
       ? { ...item, selected_take: take.id, render_status: "complete" }
-      : item));
+      : item);
+    const selectedProject = { ...canonicalProjectRef.current, segments: selectedSegments };
+    canonicalProjectRef.current = selectedProject;
+    setScriptSegments(selectedSegments);
+    try {
+      await persistProject(selectedProject);
+    } catch (error) {
+      setToast(`Take created, but project save failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
     return { take, voice };
   };
 
@@ -776,7 +847,7 @@ function App() {
             </div>
             <div className="hero-actions">
               <button className="outline-button" type="button" onClick={saveProject}>Save project</button>
-              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress) || (generationMode === "single_narrator" && fullScript.status === "assembling")}>
+              <button className="primary-button" type="button" onClick={generateAll} disabled={generationBlockedByVoice || Boolean(generateAllProgress) || (generationMode === "single_narrator" && fullScript.status === "assembling")}>
                 <span className="button-spark">+</span>
                 {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : generationMode === "single_narrator" && fullScript.status === "assembling" ? "Assembling narration" : "Generate all"}
               </button>
@@ -1027,10 +1098,14 @@ function FullScriptPreview({ fullScript, audioUrl, seekRequest, onExportWav }: {
 
 function GenerationModePanel({ mode, segments, speakerVoiceMap, selectedNarratorVoiceId, voices, isGenerating, onModeChange, onSpeakerVoiceChange, onNarratorVoiceChange, onGenerateAll }: { mode: GenerationMode; segments: ScriptSegment[]; speakerVoiceMap: Record<string, string>; selectedNarratorVoiceId: string | null; voices: VoiceProfile[]; isGenerating: boolean; onModeChange: (mode: GenerationMode) => void; onSpeakerVoiceChange: (speaker: string, voiceId: string) => void; onNarratorVoiceChange: (voiceId: string) => void; onGenerateAll: () => void }) {
   const speakers = Array.from(new Set(segments.flatMap((segment) => segment.speaker ? [segment.speaker] : [])));
+  const missingNarrator = Boolean(selectedNarratorVoiceId && !voices.some((voice) => voice.id === selectedNarratorVoiceId));
+  const missingSpeakers = speakers.filter((speaker) => speakerVoiceMap[speaker] && !voices.some((voice) => voice.id === speakerVoiceMap[speaker]));
+  const missingRequiredVoice = mode === "single_narrator" ? !selectedNarratorVoiceId || missingNarrator : speakers.some((speaker) => !speakerVoiceMap[speaker]) || missingSpeakers.length > 0;
   return <section className="generation-mode-panel">
     <div className="mode-buttons"><button className={mode === "dialogue" ? "active" : ""} disabled={isGenerating} onClick={() => onModeChange("dialogue")} type="button">Dialogue</button><button className={mode === "single_narrator" ? "active" : ""} disabled={isGenerating} onClick={() => onModeChange("single_narrator")} type="button">Single Narrator</button></div>
     {mode === "dialogue" ? <div className="speaker-mapping">{speakers.length ? speakers.map((speaker) => <label key={speaker}>{speaker}<select disabled={isGenerating} value={speakerVoiceMap[speaker] ?? ""} onChange={(event) => onSpeakerVoiceChange(speaker, event.target.value)}><option value="">Assign voice</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label>) : <span>Parse dialogue to detect speakers.</span>}</div> : <label className="narrator-mapping">Narrator<select disabled={isGenerating} value={selectedNarratorVoiceId ?? ""} onChange={(event) => onNarratorVoiceChange(event.target.value)}><option value="">Select voice</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label>}
-    <button className="primary-button generate-all-button" disabled={isGenerating || segments.length === 0} onClick={onGenerateAll} type="button">{isGenerating ? "Generating all..." : `Generate all (${segments.length})`}</button>
+    {missingNarrator && <small>Narrator voice missing</small>}{missingSpeakers.map((speaker) => <small key={speaker}>{speaker} voice missing</small>)}
+    <button className="primary-button generate-all-button" disabled={isGenerating || segments.length === 0 || missingRequiredVoice} onClick={onGenerateAll} type="button">{isGenerating ? "Generating all..." : `Generate all (${segments.length})`}</button>
   </section>;
 }
 

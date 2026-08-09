@@ -625,6 +625,31 @@ class ProviderContractTest(unittest.TestCase):
             self.assertEqual(project.json()["speaker_voice_map"], {"A": "voice-adam", "B": "voice-bella"})
             self.assertEqual([take["request_snapshot"]["speed"] for take in takes.json()], [1.37, 1.43])
 
+    def test_project_and_selected_take_survive_project_store_restart(self):
+        with TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            output_path = workspace_path / "selected.wav"
+            output_path.write_bytes(encode_wav(np.zeros(64, dtype=np.float32), 24000))
+            store = ProjectStore(workspace_path)
+            take = store.save_take("episode-01", "segment-02", str(output_path), {"kind": "audio_edit", "parent_take_id": "take-a"})
+            store.save_project(
+                "episode-01", "Persisted", "[calm] One.\n[whisper] Two.",
+                [{"id": "segment-01", "text": "One.", "selected_take": None}, {"id": "segment-02", "text": "Two.", "selected_take": take["id"]}],
+                generation_mode="single_narrator", selected_narrator_voice_id="voice-x",
+            )
+            store.close()
+
+            restarted = ProjectStore(workspace_path)
+            project = restarted.get_project("episode-01")
+            takes = restarted.list_takes("episode-01")
+            restarted.close()
+
+            self.assertIsNotNone(project)
+            self.assertEqual(project.generation_mode, "single_narrator")
+            self.assertEqual(project.selected_narrator_voice_id, "voice-x")
+            self.assertEqual(project.segments[1]["selected_take"], take["id"])
+            self.assertEqual(takes[0]["request_snapshot"]["kind"], "audio_edit")
+
 
 if __name__ == "__main__":
     unittest.main()
