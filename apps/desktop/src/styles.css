@@ -74,6 +74,15 @@ button:focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; }
 .wave-editor-empty { display: grid; position: absolute; inset: 0; place-items: center; color: #89948e; font: 500 9px var(--mono); }
 .wave-editor-actions { justify-content: flex-start; flex-wrap: wrap; padding: 12px 0 10px; }
 .wave-editor-actions > button:not(.play-button), .wave-editor-footer button { padding: 0; color: #75837e; background: transparent; font: 500 9px var(--mono); }
+.emotion:disabled { cursor: not-allowed; opacity: .45; }
+.inspector-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 13px; color: #7e8a85; font: 500 10px var(--mono); }
+.inspector-field input { width: 84px; padding: 6px 7px; color: var(--ink); background: rgba(255,255,255,.58); border: 1px solid var(--line); font: 500 10px var(--mono); text-align: right; }
+.inspector-field input:focus { outline: 1px solid var(--orange); border-color: var(--orange); }
+.inspector-field input:disabled { cursor: not-allowed; opacity: .45; }
+.take-list p { margin: 10px 0 0; color: var(--muted); font: 500 9px var(--mono); }
+.generation-mode-panel { display: grid; gap: 10px; margin: 10px 17px; padding: 11px; background: rgba(134,169,238,.08); border: 1px solid var(--line); }
+.mode-buttons { display: flex; gap: 6px; }.mode-buttons button { padding: 7px 9px; color: var(--muted); background: transparent; border: 1px solid var(--line); font: 500 9px var(--mono); }.mode-buttons button.active { color: var(--ink); background: var(--yellow); border-color: var(--yellow); }
+.speaker-mapping { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }.speaker-mapping label, .narrator-mapping { display: grid; gap: 4px; color: var(--muted); font: 500 9px var(--mono); }.speaker-mapping select, .narrator-mapping select { min-width: 0; padding: 6px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); font: inherit; }.generate-all-button { justify-self: start; }
 .wave-editor-actions > button:hover, .wave-editor-footer button:hover, .wave-editor-actions .active-tool { color: var(--orange); }
 .wave-editor-actions button:disabled, .wave-editor-footer button:disabled, .apply-edit:disabled { cursor: not-allowed; opacity: .45; }
 .zoom-control { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #75837e; font: 500 9px var(--mono); }

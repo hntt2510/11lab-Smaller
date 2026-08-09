@@ -19,6 +19,7 @@ export type GeneratePayload = {
 export type ScriptSegment = {
   id: string;
   text: string;
+  speaker?: string | null;
   voice_id?: string | null;
   emotion?: string | null;
   instruct?: string | null;
@@ -35,6 +36,14 @@ export type ScriptSegment = {
   render_status: string;
   native_tags: string[];
   warnings: string[];
+};
+
+export type StudioPreset = {
+  speed?: number;
+  volume?: number;
+  pause_after_ms?: number;
+  take_count?: number;
+  instruct?: string;
 };
 
 export type VoiceProfile = {
@@ -107,6 +116,17 @@ export type GeneratedAudio = {
   outputPath: string | null;
 };
 
+export type Take = {
+  id: string;
+  project_id: string;
+  segment_id: string;
+  output_path: string;
+  request_snapshot: Record<string, unknown>;
+  created_at: string;
+};
+
+export type GenerationMode = "dialogue" | "single_narrator";
+
 type EngineBootstrap = {
   baseUrl: string;
   token: string;
@@ -143,14 +163,18 @@ export class LocalEngineClient {
     return this.request<EngineHealth>("/health");
   }
 
-  parseScript(source: string, defaultVoiceId?: string): Promise<{
+  parseScript(source: string, mode: GenerationMode, defaultVoiceId?: string): Promise<{
     segments: ScriptSegment[];
     suspicious_terms: string[];
   }> {
     return this.request<{ segments: ScriptSegment[]; suspicious_terms: string[] }>("/script/parse", {
       method: "POST",
-      body: JSON.stringify({ source, default_voice_id: defaultVoiceId }),
+      body: JSON.stringify({ source, mode, default_voice_id: defaultVoiceId }),
     });
+  }
+
+  getStudioPresets(): Promise<Record<string, StudioPreset>> {
+    return this.request<Record<string, StudioPreset>>("/script/presets");
   }
 
   analyzeReference(path: string, targetLanguage?: string): Promise<ReferenceAnalysis> {
@@ -211,11 +235,29 @@ export class LocalEngineClient {
     source: string;
     segments: ScriptSegment[];
     pronunciation_entries?: Record<string, unknown>[];
+    generation_mode: GenerationMode;
+    speaker_voice_map: Record<string, string>;
+    selected_narrator_voice_id?: string | null;
   }): Promise<Record<string, unknown>> {
     return this.request<Record<string, unknown>>(`/projects/${encodeURIComponent(projectId)}`, {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+  }
+
+  createTake(projectId: string, payload: {
+    segment_id: string;
+    output_path: string;
+    request_snapshot: Record<string, unknown>;
+  }): Promise<Take> {
+    return this.request<Take>(`/projects/${encodeURIComponent(projectId)}/takes`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  listTakes(projectId: string): Promise<Take[]> {
+    return this.request<Take[]>(`/projects/${encodeURIComponent(projectId)}/takes`);
   }
 
   async generate(payload: GeneratePayload): Promise<GeneratedAudio> {

@@ -30,20 +30,17 @@ STUDIO_PRESETS: dict[str, dict[str, Any]] = {
         "speed": 0.92,
         "pause_after_ms": 280,
         "take_count": 1,
-        "instruct": "calm",
     },
     "excited": {
         "speed": 1.05,
         "pause_after_ms": 120,
         "take_count": 2,
-        "instruct": "excited",
     },
-    "sad": {"speed": 0.88, "pause_after_ms": 300, "take_count": 1, "instruct": "sad"},
+    "sad": {"speed": 0.88, "pause_after_ms": 300, "take_count": 1},
     "serious": {
         "speed": 0.94,
         "pause_after_ms": 220,
         "take_count": 1,
-        "instruct": "serious",
     },
     "whisper": {
         "speed": 0.94,
@@ -58,7 +55,6 @@ STUDIO_PRESETS: dict[str, dict[str, Any]] = {
         "speed": 1.0,
         "pause_after_ms": 180,
         "take_count": 2,
-        "instruct": "emphasis",
     },
 }
 
@@ -67,6 +63,9 @@ _SPEED_PATTERN = re.compile(r"^speed\s*=\s*(0?\.\d+|\d+(?:\.\d+)?)$", re.I)
 _PAUSE_PATTERN = re.compile(r"^pause\s*=\s*(\d+)$", re.I)
 _DURATION_PATTERN = re.compile(r"^duration\s*=\s*(\d+(?:\.\d+)?)$", re.I)
 _VOICE_PATTERN = re.compile(r"^voice\s*=\s*([\w.-]+)$", re.I)
+_SPEAKER_PREFIX_PATTERN = re.compile(
+    r"^(?P<speaker>[A-Za-z][A-Za-z _-]{0,63}):\s*(?P<text>.+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +74,7 @@ class ScriptSegment:
 
     id: str
     text: str
+    speaker: str | None = None
     voice_id: str | None = None
     emotion: str | None = None
     instruct: str | None = None
@@ -96,6 +96,7 @@ class ScriptSegment:
         return {
             "id": self.id,
             "text": self.text,
+            "speaker": self.speaker,
             "voice_id": self.voice_id,
             "emotion": self.emotion,
             "instruct": self.instruct,
@@ -115,7 +116,11 @@ class ScriptSegment:
         }
 
 
-def parse_script(source: str, default_voice_id: str | None = None) -> list[ScriptSegment]:
+def parse_script(
+    source: str,
+    default_voice_id: str | None = None,
+    dialogue: bool = False,
+) -> list[ScriptSegment]:
     """Parse one segment per non-empty line, preserving native model tags."""
 
     if not source.strip():
@@ -127,6 +132,13 @@ def parse_script(source: str, default_voice_id: str | None = None) -> list[Scrip
         line = raw_line.strip()
         if not line:
             continue
+
+        speaker: str | None = None
+        if dialogue:
+            speaker_match = _SPEAKER_PREFIX_PATTERN.match(line)
+            if speaker_match is not None:
+                speaker = speaker_match.group("speaker").strip()
+                line = speaker_match.group("text").strip()
 
         emotion: str | None = None
         instruct: str | None = None
@@ -224,6 +236,8 @@ def parse_script(source: str, default_voice_id: str | None = None) -> list[Scrip
 
         if unknown_tags:
             warnings.append("Unknown studio tags kept in text: " + ", ".join(unknown_tags))
+        if dialogue and speaker is None:
+            warnings.append("Dialogue line has no speaker prefix and requires a voice assignment.")
         if emotion in {"excited", "whisper"}:
             warnings.append("Studio direction is best-effort; the reference voice remains dominant.")
 
@@ -232,6 +246,7 @@ def parse_script(source: str, default_voice_id: str | None = None) -> list[Scrip
             ScriptSegment(
                 id=f"segment-{len(segments) + 1:02d}",
                 text=text,
+                speaker=speaker,
                 voice_id=voice_id,
                 emotion=emotion,
                 instruct=instruct,

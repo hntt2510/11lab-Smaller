@@ -4,25 +4,22 @@ import gsap from "gsap";
 
 import {
   EngineHealth,
+  GenerationMode,
   ReferenceAnalysis,
   ScriptSegment,
+  StudioPreset,
+  Take,
   VoiceProfile,
   getLocalEngineClient,
 } from "./lib/local-engine";
 import type { AudioEditOptions } from "./lib/local-engine";
+import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveSegmentVoiceId, updateSegmentById } from "./lib/segment-state";
 import { WaveformEditor } from "./components/WaveformEditor";
 
 gsap.registerPlugin(useGSAP);
 
 type ViewKey = "home" | "voices" | "studio" | "batch" | "history";
 type RenderStatus = "ready" | "rendering" | "complete";
-
-type ScriptLine = {
-  id: string;
-  tag: string;
-  text: string;
-  duration: string;
-};
 
 type NavItem = {
   key: ViewKey;
@@ -48,34 +45,70 @@ const navItems: NavItem[] = [
   { key: "history", label: "Render history", short: "H", count: "12" },
 ];
 
-const scripts = [
+const initialSegments: ScriptSegment[] = [
   {
-    id: "01",
-    tag: "calm",
+    id: "segment-01",
     text: "Tonight, the signal arrives from a place no map can name.",
-    duration: "00:06.8",
+    voice_id: null,
+    emotion: "calm",
+    instruct: null,
+    speed: 0.92,
+    duration: null,
+    pause_before_ms: 0,
+    pause_after_ms: 280,
+    volume: 1,
+    inference_quality: "Balanced",
+    guidance: 2,
+    take_count: 1,
+    pronunciation_overrides: {},
+    selected_take: null,
+    render_status: "draft",
+    native_tags: [],
+    warnings: [],
   },
   {
-    id: "02",
-    tag: "curious",
+    id: "segment-02",
     text: "At first, it sounds like static. Then it starts answering back.",
-    duration: "00:07.4",
+    voice_id: null,
+    emotion: null,
+    instruct: null,
+    speed: 1,
+    duration: null,
+    pause_before_ms: 500,
+    pause_after_ms: 0,
+    volume: 1,
+    inference_quality: "Balanced",
+    guidance: 2,
+    take_count: 1,
+    pronunciation_overrides: {},
+    selected_take: null,
+    render_status: "draft",
+    native_tags: [],
+    warnings: [],
   },
   {
-    id: "03",
-    tag: "emphasis",
+    id: "segment-03",
     text: "This is where the quiet side of the story changes everything.",
-    duration: "00:06.1",
+    voice_id: null,
+    emotion: "emphasis",
+    instruct: null,
+    speed: 1.08,
+    duration: null,
+    pause_before_ms: 0,
+    pause_after_ms: 180,
+    volume: 1,
+    inference_quality: "Balanced",
+    guidance: 2,
+    take_count: 2,
+    pronunciation_overrides: {},
+    selected_take: null,
+    render_status: "draft",
+    native_tags: [],
+    warnings: [],
   },
 ];
 
 const scriptSource = "[calm] Tonight, the signal arrives from a place no map can name.\n[pause=500]\n[curious] At first, it sounds like static. Then it starts answering back.\n[excited speed=1.08] This is where the quiet side of the story changes everything.";
-
-const demoVoices: VoiceCard[] = [
-  { id: "atlas", name: "Atlas", detail: "warm low / English", score: 92, tone: "orange", tag: "NATURAL" },
-  { id: "mira", name: "Mira", detail: "clear bright / Vietnamese", score: 86, tone: "blue", tag: "LOCAL ONLY" },
-  { id: "north", name: "North", detail: "measured / English", score: 78, tone: "green", tag: "REFERENCE" },
-];
 
 function voiceToCard(profile: VoiceProfile): VoiceCard {
   return {
@@ -125,17 +158,29 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+function formatSegmentDuration(duration: number | null | undefined) {
+  return duration ? `${duration.toFixed(1)}s` : "--";
+}
+
 function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const [activeView, setActiveView] = useState<ViewKey>("studio");
-  const [selectedScript, setSelectedScript] = useState("02");
-  const [scriptLines, setScriptLines] = useState<ScriptLine[]>(scripts);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>("segment-02");
+  const [scriptSegments, setScriptSegments] = useState<ScriptSegment[]>(initialSegments);
+  const [generationMode, setGenerationMode] = useState<GenerationMode>("single_narrator");
+  const [speakerVoiceMap, setSpeakerVoiceMap] = useState<Record<string, string>>({});
+  const [selectedNarratorVoiceId, setSelectedNarratorVoiceId] = useState<string | null>(null);
+  const [takes, setTakes] = useState<Take[]>([]);
+  const [generateAllProgress, setGenerateAllProgress] = useState<{ current: number; total: number } | null>(null);
   const [sourceDraft, setSourceDraft] = useState(scriptSource);
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("ready");
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
+  const [studioPresets, setStudioPresets] = useState<Record<string, StudioPreset> | null>(null);
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null);
   const [engineHealth, setEngineHealth] = useState<EngineHealth>({
     status: "offline",
     provider: "omnivoice",
@@ -206,6 +251,52 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const client = getLocalEngineClient();
+    if (!client) return;
+    client.getStudioPresets().then(setStudioPresets).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const client = getLocalEngineClient();
+    if (!client) return;
+    client.listVoices().then(setVoiceProfiles).catch(() => undefined);
+  }, []);
+
+  const selectedSegment = selectedSegmentId
+    ? scriptSegments.find((segment) => segment.id === selectedSegmentId) ?? null
+    : null;
+  const effectiveVoiceId = selectedSegment ? resolveSegmentVoiceId(selectedSegment, generationMode, speakerVoiceMap, selectedNarratorVoiceId) : null;
+  const selectedVoice = effectiveVoiceId
+    ? voiceProfiles.find((profile) => profile.id === effectiveVoiceId) ?? null
+    : null;
+
+  const dialogueSpeakers = Array.from(new Set(
+    scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
+  ));
+  const selectVoice = (voiceId: string) => {
+    setSelectedVoiceId(voiceId);
+    setSelectedNarratorVoiceId(voiceId);
+  };
+
+  const updateSelectedSegment = contextSafe((patch: Partial<Pick<ScriptSegment, "speed" | "duration" | "guidance" | "pause_before_ms" | "pause_after_ms" | "volume">>) => {
+    if (!selectedSegmentId) return;
+    setScriptSegments((current) => updateSegmentById(current, selectedSegmentId, patch));
+  });
+
+  const applyStudioPreset = contextSafe((emotion: string) => {
+    const preset = studioPresets?.[emotion];
+    if (!selectedSegmentId || !preset) {
+      setToast("Studio presets are unavailable");
+      return;
+    }
+    setScriptSegments((current) => current.map((segment) => (
+      segment.id === selectedSegmentId
+        ? applyStudioPresetToSegment(segment, emotion, preset)
+        : segment
+    )));
+  });
+
   const chooseView = contextSafe((view: ViewKey) => {
     if (view === activeView) return;
     setActiveView(view);
@@ -223,15 +314,13 @@ function App() {
       return;
     }
     try {
-      const parsed = await client.parseScript(sourceDraft, "atlas");
-      setScriptLines(
-        parsed.segments.map((segment, index) => ({
-          id: String(index + 1).padStart(2, "0"),
-          tag: segment.emotion ?? "line",
-          text: segment.text,
-          duration: segment.duration ? `${segment.duration.toFixed(1)}s` : "--",
-        })),
-      );
+      const parsed = await client.parseScript(sourceDraft, generationMode);
+      setScriptSegments(parsed.segments);
+      setSelectedSegmentId(parsed.segments[0]?.id ?? null);
+      setSpeakerVoiceMap((current) => Object.fromEntries(
+        Array.from(new Set(parsed.segments.flatMap((segment) => segment.speaker ? [segment.speaker] : [])))
+          .flatMap((speaker) => current[speaker] ? [[speaker, current[speaker]]] : []),
+      ));
       setToast(`Parsed ${parsed.segments.length} directed lines`);
     } catch {
       setToast("Script parser is unavailable");
@@ -248,7 +337,10 @@ function App() {
       await client.saveProject("episode-01", {
         name: "Night signal",
         source: sourceDraft,
-        segments: scriptLines.map(lineToSegment),
+        segments: scriptSegments,
+        generation_mode: generationMode,
+        speaker_voice_map: speakerVoiceMap,
+        selected_narrator_voice_id: selectedNarratorVoiceId,
       });
       setToast("Project autosaved to the local workspace");
     } catch {
@@ -256,31 +348,95 @@ function App() {
     }
   });
 
-  const generateTake = contextSafe(async () => {
-    setRenderStatus("rendering");
-    setToast("Take queued in the local render lane");
-    gsap.fromTo(
-      ".render-meter",
-      { scaleX: 0, transformOrigin: "left center" },
-      { scaleX: 1, duration: 1.5, ease: "power2.inOut", overwrite: true },
-    );
-
+  const generateSegment = async (segment: ScriptSegment, profiles: VoiceProfile[]) => {
     const client = getLocalEngineClient();
-    if (client) {
+    if (!client) throw new Error("Local engine is unavailable");
+    const voiceId = resolveSegmentVoiceId(segment, generationMode, speakerVoiceMap, selectedNarratorVoiceId);
+    const voice = voiceId ? profiles.find((profile) => profile.id === voiceId) : undefined;
+    if (!voice?.reference_audio) throw new Error("No usable voice is assigned");
+    const requestSnapshot = {
+      text: segment.text, voice_id: voice.id, ref_audio: voice.reference_audio,
+      ref_text: voice.reference_transcript ?? null, instruct: segment.instruct,
+      duration: segment.duration, speed: segment.speed,
+      options: { num_step: 32, guidance_scale: segment.guidance, postprocess_output: true },
+    };
+    const generated = await client.generate({
+      text: segment.text,
+      ref_audio: voice.reference_audio,
+      ref_text: voice.reference_transcript ?? undefined,
+      instruct: segment.instruct ?? undefined,
+      duration: segment.duration ?? undefined,
+      speed: segment.speed,
+      options: requestSnapshot.options,
+    });
+    if (!generated.outputPath) throw new Error("Local engine did not persist the generated WAV");
+    const take = await client.createTake("episode-01", {
+      segment_id: segment.id,
+      output_path: generated.outputPath,
+      request_snapshot: requestSnapshot,
+    });
+    setTakes((current) => [...current, take]);
+    setScriptSegments((current) => current.map((item) => item.id === segment.id
+      ? { ...item, selected_take: take.id, render_status: "complete" }
+      : item));
+    if (selectedSegmentId === segment.id) {
+      setAudioPath(generated.outputPath);
+      setAudioUrl(URL.createObjectURL(generated.blob));
+    }
+    return { take, voice };
+  };
+
+  const generateTake = contextSafe(async () => {
+    if (!selectedSegment || generateAllProgress) return;
+    const client = getLocalEngineClient();
+    if (!client) {
+      setToast("Connect the local engine before generating a take");
+      return;
+    }
+    const profiles = await client.listVoices();
+    setVoiceProfiles(profiles);
+    setRenderStatus("rendering");
+    try {
+      const result = await generateSegment(selectedSegment, profiles);
+      setRenderStatus("complete");
+      setToast(`Take created using ${result.voice.name}`);
+    } catch (error) {
+      setRenderStatus("ready");
+      setScriptSegments((current) => current.map((item) => item.id === selectedSegment.id
+        ? { ...item, render_status: "failed", warnings: [...item.warnings, error instanceof Error ? error.message : "Generation failed"] }
+        : item));
+      setToast(error instanceof Error ? error.message : "Take generation failed");
+    }
+  });
+
+  const generateAll = contextSafe(async () => {
+    if (generateAllProgress || scriptSegments.length === 0) return;
+    const client = getLocalEngineClient();
+    if (!client) {
+      setToast("Connect the local engine before generating all lines");
+      return;
+    }
+    const profiles = await client.listVoices();
+    setVoiceProfiles(profiles);
+    let completed = 0;
+    let failed = 0;
+    setGenerateAllProgress({ current: 0, total: scriptSegments.length });
+    for (let index = 0; index < scriptSegments.length; index += 1) {
+      const segment = scriptSegments[index];
+      setGenerateAllProgress({ current: index + 1, total: scriptSegments.length });
+      setScriptSegments((current) => current.map((item) => item.id === segment.id ? { ...item, render_status: "rendering" } : item));
       try {
-        const generated = await client.generate({
-          text: scriptLines.find((script) => script.id === selectedScript)?.text ?? scriptLines[0].text,
-          options: { num_step: 32, postprocess_output: true },
-        });
-        setAudioPath(generated.outputPath);
-        setAudioUrl(URL.createObjectURL(generated.blob));
-        setRenderStatus("complete");
-        setToast("WAV returned by the local engine");
-      } catch {
-        setRenderStatus("ready");
-        setToast("Local engine is unavailable; showing preview state");
+        await generateSegment(segment, profiles);
+        completed += 1;
+      } catch (error) {
+        failed += 1;
+        setScriptSegments((current) => current.map((item) => item.id === segment.id
+          ? { ...item, render_status: "failed", warnings: [...item.warnings, error instanceof Error ? error.message : "Generation failed"] }
+          : item));
       }
     }
+    setGenerateAllProgress(null);
+    setToast(failed ? `${completed} generated, ${failed} failed` : `${completed} lines generated`);
   });
 
   const processAudioEdit = contextSafe(async (options: Omit<AudioEditOptions, "source_path">) => {
@@ -350,7 +506,7 @@ function App() {
       return;
     }
     try {
-      const result = await client.exportSrt(scriptLines.map(lineToSegment), "episode-01.srt");
+      const result = await client.exportSrt(scriptSegments, "episode-01.srt");
       downloadBlob(await client.fetchFile(result.output_path), "episode-01.srt");
       setToast("SRT export downloaded");
     } catch {
@@ -438,17 +594,17 @@ function App() {
             </div>
             <div className="hero-actions">
               <button className="outline-button" type="button" onClick={saveProject}>Save project</button>
-              <button className="primary-button" type="button" onClick={generateTake}>
+              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress)}>
                 <span className="button-spark">+</span>
-                Generate take
+                {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : "Generate all"}
               </button>
             </div>
           </section>
 
           {activeView === "studio" ? (
             <StudioView
-              onSelect={setSelectedScript}
-              selectedScript={selectedScript}
+              onSelect={setSelectedSegmentId}
+              selectedSegmentId={selectedSegmentId}
               renderStatus={renderStatus}
               onGenerate={generateTake}
               audioUrl={audioUrl}
@@ -458,13 +614,32 @@ function App() {
               onExportMp3={exportMp3}
               onExportSrt={exportSrt}
               onReplaceTake={generateTake}
-              scripts={scriptLines}
+              segments={scriptSegments}
+              generationMode={generationMode}
+              speakerVoiceMap={speakerVoiceMap}
+              selectedNarratorVoiceId={selectedNarratorVoiceId}
+              voices={voiceProfiles}
+              isGeneratingAll={Boolean(generateAllProgress)}
+              onModeChange={(mode) => { setGenerationMode(mode); setToast("Mode changed. Parse the source to apply it."); }}
+              onSpeakerVoiceChange={(speaker, voiceId) => setSpeakerVoiceMap((current) => ({ ...current, [speaker]: voiceId }))}
+              onNarratorVoiceChange={selectVoice}
+              onGenerateAll={generateAll}
               sourceDraft={sourceDraft}
               onSourceChange={setSourceDraft}
               onParse={parseDraft}
             />
           ) : (
-            <OverviewView view={activeView} onOpenStudio={() => chooseView("studio")} />
+            <OverviewView
+              view={activeView}
+              onOpenStudio={() => chooseView("studio")}
+              voiceProfiles={voiceProfiles}
+              selectedVoiceId={selectedVoiceId}
+              onSelectVoice={selectVoice}
+              onVoiceCreated={(profile) => {
+                setVoiceProfiles((current) => [profile, ...current.filter((voice) => voice.id !== profile.id)]);
+                selectVoice(profile.id);
+              }}
+            />
           )}
         </div>
       </main>
@@ -475,10 +650,9 @@ function App() {
             <span className="tiny-label">INSPECTOR</span>
             <h2>{activeView === "studio" ? "Line direction" : "Workspace pulse"}</h2>
           </div>
-          <button className="icon-button" type="button" aria-label="Close inspector">x</button>
         </div>
         {activeView === "studio" ? (
-          <StudioInspector renderStatus={renderStatus} onGenerate={generateTake} />
+          <StudioInspector renderStatus={renderStatus} onGenerate={generateTake} selectedSegment={selectedSegment} selectedVoice={selectedVoice} selectedVoiceId={effectiveVoiceId} presets={studioPresets} takes={takes} onUpdateSegment={updateSelectedSegment} onApplyPreset={applyStudioPreset} />
         ) : (
           <DiagnosticsMini onOpen={() => setShowDiagnostics(true)} />
         )}
@@ -490,32 +664,9 @@ function App() {
   );
 }
 
-function lineToSegment(line: ScriptLine): ScriptSegment {
-  return {
-    id: `segment-${line.id}`,
-    text: line.text,
-    voice_id: "atlas",
-    emotion: line.tag === "line" ? null : line.tag,
-    instruct: line.tag === "line" ? null : line.tag,
-    speed: 1,
-    duration: null,
-    pause_before_ms: 0,
-    pause_after_ms: 0,
-    volume: 1,
-    inference_quality: "Balanced",
-    guidance: 2,
-    take_count: 1,
-    pronunciation_overrides: {},
-    selected_take: null,
-    render_status: "draft",
-    native_tags: [],
-    warnings: [],
-  };
-}
-
 function StudioView({
   onSelect,
-  selectedScript,
+  selectedSegmentId,
   renderStatus,
   onGenerate,
   audioUrl,
@@ -525,13 +676,22 @@ function StudioView({
   onExportMp3,
   onExportSrt,
   onReplaceTake,
-  scripts,
+  segments,
+  generationMode,
+  speakerVoiceMap,
+  selectedNarratorVoiceId,
+  voices,
+  isGeneratingAll,
+  onModeChange,
+  onSpeakerVoiceChange,
+  onNarratorVoiceChange,
+  onGenerateAll,
   sourceDraft,
   onSourceChange,
   onParse,
 }: {
   onSelect: (id: string) => void;
-  selectedScript: string;
+  selectedSegmentId: string | null;
   renderStatus: RenderStatus;
   onGenerate: () => void;
   audioUrl: string | null;
@@ -541,7 +701,16 @@ function StudioView({
   onExportMp3: () => void;
   onExportSrt: () => void;
   onReplaceTake: () => void;
-  scripts: ScriptLine[];
+  segments: ScriptSegment[];
+  generationMode: GenerationMode;
+  speakerVoiceMap: Record<string, string>;
+  selectedNarratorVoiceId: string | null;
+  voices: VoiceProfile[];
+  isGeneratingAll: boolean;
+  onModeChange: (mode: GenerationMode) => void;
+  onSpeakerVoiceChange: (speaker: string, voiceId: string) => void;
+  onNarratorVoiceChange: (voiceId: string) => void;
+  onGenerateAll: () => void;
   sourceDraft: string;
   onSourceChange: (source: string) => void;
   onParse: () => void;
@@ -558,20 +727,33 @@ function StudioView({
           <textarea value={sourceDraft} onChange={(event) => onSourceChange(event.target.value)} aria-label="Script source tags" />
           <button type="button" onClick={onParse}>Parse into segments -&gt;</button>
         </details>
+        <GenerationModePanel
+          mode={generationMode}
+          segments={segments}
+          speakerVoiceMap={speakerVoiceMap}
+          selectedNarratorVoiceId={selectedNarratorVoiceId}
+          voices={voices}
+          isGenerating={isGeneratingAll}
+          onModeChange={onModeChange}
+          onSpeakerVoiceChange={onSpeakerVoiceChange}
+          onNarratorVoiceChange={onNarratorVoiceChange}
+          onGenerateAll={onGenerateAll}
+        />
         <div className="script-list">
-          {scripts.map((script) => (
+          {segments.map((segment) => (
             <button
-              className={`script-line ${selectedScript === script.id ? "selected" : ""}`}
-              key={script.id}
-              onClick={() => onSelect(script.id)}
+              className={`script-line ${selectedSegmentId === segment.id ? "selected" : ""}`}
+              key={segment.id}
+              onClick={() => onSelect(segment.id)}
               type="button"
             >
-              <span className="line-number">{script.id}</span>
+              <span className="line-number">{segment.id.replace("segment-", "")}</span>
               <span className="line-copy">
-                <span className={`tag-pill tag-${script.tag}`}>[{script.tag}]</span>
-                <span className="line-text">{script.text}</span>
+                {segment.emotion && <span className={`tag-pill tag-${segment.emotion}`}>[{segment.emotion}]</span>}
+                <span className="line-text">{segment.text}</span>
+                {segment.warnings.length > 0 && <span className="tag-pill" title={segment.warnings.join(" / ")}>!</span>}
               </span>
-              <span className="line-duration">{script.duration}</span>
+              <span className="line-duration">{formatSegmentDuration(segment.duration)}</span>
               <span className="line-grip">::</span>
             </button>
           ))}
@@ -606,27 +788,52 @@ function StudioView({
   );
 }
 
-function StudioInspector({ renderStatus, onGenerate }: { renderStatus: RenderStatus; onGenerate: () => void }) {
+function GenerationModePanel({ mode, segments, speakerVoiceMap, selectedNarratorVoiceId, voices, isGenerating, onModeChange, onSpeakerVoiceChange, onNarratorVoiceChange, onGenerateAll }: { mode: GenerationMode; segments: ScriptSegment[]; speakerVoiceMap: Record<string, string>; selectedNarratorVoiceId: string | null; voices: VoiceProfile[]; isGenerating: boolean; onModeChange: (mode: GenerationMode) => void; onSpeakerVoiceChange: (speaker: string, voiceId: string) => void; onNarratorVoiceChange: (voiceId: string) => void; onGenerateAll: () => void }) {
+  const speakers = Array.from(new Set(segments.flatMap((segment) => segment.speaker ? [segment.speaker] : [])));
+  return <section className="generation-mode-panel">
+    <div className="mode-buttons"><button className={mode === "dialogue" ? "active" : ""} disabled={isGenerating} onClick={() => onModeChange("dialogue")} type="button">Dialogue</button><button className={mode === "single_narrator" ? "active" : ""} disabled={isGenerating} onClick={() => onModeChange("single_narrator")} type="button">Single Narrator</button></div>
+    {mode === "dialogue" ? <div className="speaker-mapping">{speakers.length ? speakers.map((speaker) => <label key={speaker}>{speaker}<select disabled={isGenerating} value={speakerVoiceMap[speaker] ?? ""} onChange={(event) => onSpeakerVoiceChange(speaker, event.target.value)}><option value="">Assign voice</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label>) : <span>Parse dialogue to detect speakers.</span>}</div> : <label className="narrator-mapping">Narrator<select disabled={isGenerating} value={selectedNarratorVoiceId ?? ""} onChange={(event) => onNarratorVoiceChange(event.target.value)}><option value="">Select voice</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label>}
+    <button className="primary-button generate-all-button" disabled={isGenerating || segments.length === 0} onClick={onGenerateAll} type="button">{isGenerating ? "Generating all..." : `Generate all (${segments.length})`}</button>
+  </section>;
+}
+
+function StudioInspector({ renderStatus, onGenerate, selectedSegment, selectedVoice, selectedVoiceId, presets, takes, onUpdateSegment, onApplyPreset }: { renderStatus: RenderStatus; onGenerate: () => void; selectedSegment: ScriptSegment | null; selectedVoice: VoiceProfile | null; selectedVoiceId: string | null; presets: Record<string, StudioPreset> | null; takes: Take[]; onUpdateSegment: (patch: EditableSegmentPatch) => void; onApplyPreset: (emotion: string) => void }) {
+  const voiceLabel = selectedVoice
+    ? `${selectedVoice.name} / ${selectedVoice.default_preset}`
+    : selectedVoiceId
+      ? "Voice profile unavailable"
+      : "No voice selected";
+  const emotion = selectedSegment?.emotion ?? "No direction";
+  const segmentTakes = takes.filter((take) => take.segment_id === selectedSegment?.id);
   return (
     <div className="inspector-scroll">
-      <div className="selection-label"><span className="selection-number">02</span><div><span className="tiny-label">SELECTED LINE</span><strong>Curious / 00:07.4</strong></div></div>
-      <div className="voice-select"><div className="voice-avatar">AR</div><div><span className="tiny-label">VOICE PROFILE</span><strong>Atlas / warm low</strong></div><span className="select-chevron">v</span></div>
-      <div className="inspector-section"><div className="section-heading"><span>Direction</span><button type="button">Reset</button></div><div className="emotion-grid"><button className="emotion active" type="button"><span>01</span>Curious</button><button className="emotion" type="button"><span>02</span>Bright</button><button className="emotion" type="button"><span>03</span>Measured</button></div></div>
-      <div className="inspector-section sliders"><div className="section-heading"><span>Performance</span><span className="unit-label">PRESET / NATURAL</span></div><RangeRow label="Speed" value="0.98" percent={46} /><RangeRow label="Guidance" value="2.0" percent={58} /><RangeRow label="Pause after" value="420 ms" percent={35} /></div>
-      <div className="instruct-note"><span className="note-symbol">i</span><p>Studio tags are best-effort direction. The reference voice still leads the performance.</p></div>
+      <div className="selection-label"><span className="selection-number">{selectedSegment?.id.replace("segment-", "") ?? "--"}</span><div><span className="tiny-label">SELECTED LINE</span><strong>{emotion} / {formatSegmentDuration(selectedSegment?.duration)}</strong></div></div>
+      <div className="voice-select"><div className="voice-avatar">{selectedVoice?.name.slice(0, 2).toUpperCase() ?? "--"}</div><div><span className="tiny-label">VOICE PROFILE</span><strong>{voiceLabel}</strong></div><span className="select-chevron">v</span></div>
+      <div className="inspector-section"><div className="section-heading"><span>Direction</span><span className="unit-label">STUDIO PRESET</span></div><div className="emotion-grid">{presets ? Object.keys(presets).map((preset, index) => <button className={`emotion ${emotion === preset ? "active" : ""}`} key={preset} onClick={() => onApplyPreset(preset)} type="button" disabled={!selectedSegment}><span>{String(index + 1).padStart(2, "0")}</span>{preset}</button>) : <span className="unit-label">Presets unavailable</span>}</div><small>{selectedSegment?.instruct ? `Provider instruct: ${selectedSegment.instruct}` : "Studio direction only; no provider instruct"}</small></div>
+      <div className="inspector-section sliders"><div className="section-heading"><span>Performance</span><span className="unit-label">{selectedSegment?.inference_quality ?? "Balanced"}</span></div><NumericField disabled={!selectedSegment} label="Speed" value={selectedSegment?.speed ?? null} min={0.01} step={0.01} onChange={(speed) => onUpdateSegment({ speed: speed as number })} /><NumericField disabled={!selectedSegment} label="Duration" value={selectedSegment?.duration ?? null} min={0.01} step={0.1} nullable onChange={(duration) => onUpdateSegment({ duration })} /><NumericField disabled={!selectedSegment} label="Guidance" value={selectedSegment?.guidance ?? null} min={0} step={0.01} onChange={(guidance) => onUpdateSegment({ guidance: guidance as number })} /><NumericField disabled={!selectedSegment} label="Pause before" value={selectedSegment?.pause_before_ms ?? null} min={0} step={1} integer onChange={(pause_before_ms) => onUpdateSegment({ pause_before_ms: pause_before_ms as number })} /><NumericField disabled={!selectedSegment} label="Pause after" value={selectedSegment?.pause_after_ms ?? null} min={0} step={1} integer onChange={(pause_after_ms) => onUpdateSegment({ pause_after_ms: pause_after_ms as number })} /><NumericField disabled={!selectedSegment} label="Volume" value={selectedSegment?.volume ?? null} min={0} step={0.01} onChange={(volume) => onUpdateSegment({ volume: volume as number })} /></div>
+      <div className="instruct-note"><span className="note-symbol">i</span><p>{selectedSegment?.warnings.length ? selectedSegment.warnings.join(" / ") : "Studio tags are best-effort direction. The reference voice still leads the performance."}</p></div>
       <button className={`inspector-generate ${renderStatus === "rendering" ? "busy" : ""}`} onClick={onGenerate} type="button"><span>{renderStatus === "rendering" ? "Rendering take..." : "Generate new take"}</span><span>-&gt;</span></button>
-      <div className="take-list"><div className="section-heading"><span>Recent takes</span><span className="unit-label">TODAY</span></div><div className="take-row"><span className="take-badge selected">B</span><span><strong>Natural</strong><small>00:07.4 / 2.8 MB</small></span><span className="take-check">OK</span></div><div className="take-row"><span className="take-badge">A</span><span><strong>Stable</strong><small>00:07.1 / 2.7 MB</small></span><button type="button">...</button></div></div>
+      <div className="take-list"><div className="section-heading"><span>Recent takes</span><span className="unit-label">{segmentTakes.length}</span></div>{segmentTakes.length ? segmentTakes.map((take, index) => <div className="take-row" key={take.id}><span className="take-badge selected">{index + 1}</span><span><strong>Take {index + 1}</strong><small>{take.output_path}</small></span></div>) : <p>No takes for this line yet.</p>}</div>
     </div>
   );
 }
 
-function RangeRow({ label, value, percent }: { label: string; value: string; percent: number }) {
-  return <div className="range-row"><div><span>{label}</span><strong>{value}</strong></div><div className="range-track"><span style={{ width: `${percent}%` }} /><i style={{ left: `${percent}%` }} /></div></div>;
+function NumericField({ disabled = false, label, value, min, step, integer = false, nullable = false, onChange }: { disabled?: boolean; label: string; value: number | null; min: number; step: number; integer?: boolean; nullable?: boolean; onChange: (value: number | null) => void }) {
+  const updateValue = (raw: string) => {
+    if (raw === "" && nullable) {
+      onChange(null);
+      return;
+    }
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric) || numeric < min || (integer && !Number.isInteger(numeric))) return;
+    onChange(numeric);
+  };
+  return <label className="inspector-field"><span>{label}</span><input aria-label={label} disabled={disabled || (value === null && !nullable)} min={min} step={step} type="number" value={value ?? ""} onChange={(event) => updateValue(event.target.value)} placeholder={nullable ? "Auto" : undefined} /></label>;
 }
 
-function OverviewView({ view, onOpenStudio }: { view: ViewKey; onOpenStudio: () => void }) {
+function OverviewView({ view, onOpenStudio, voiceProfiles, selectedVoiceId, onSelectVoice, onVoiceCreated }: { view: ViewKey; onOpenStudio: () => void; voiceProfiles: VoiceProfile[]; selectedVoiceId: string | null; onSelectVoice: (id: string) => void; onVoiceCreated: (profile: VoiceProfile) => void }) {
   if (view === "voices") {
-    return <VoiceLibraryView onOpenStudio={onOpenStudio} />;
+    return <VoiceLibraryView onOpenStudio={onOpenStudio} voiceProfiles={voiceProfiles} selectedVoiceId={selectedVoiceId} onSelectVoice={onSelectVoice} onVoiceCreated={onVoiceCreated} />;
   }
 
   if (view === "home") {
@@ -637,27 +844,17 @@ function OverviewView({ view, onOpenStudio }: { view: ViewKey; onOpenStudio: () 
   return <div className="empty-view reveal-card"><div className="empty-stamp">{view === "batch" ? "B" : "H"}</div><span className="tiny-label">{view.toUpperCase()} / FOUNDATION</span><h3>The {label} are ready for the next pass.</h3><p>This foundation view is wired to the same local-first workspace. The next feature slice will connect it to persistent project data.</p><button className="outline-button" onClick={onOpenStudio} type="button">Back to studio -&gt;</button></div>;
 }
 
-function VoiceLibraryView({ onOpenStudio }: { onOpenStudio: () => void }) {
-  const [voices, setVoices] = useState(demoVoices);
-  const [selectedVoice, setSelectedVoice] = useState("atlas");
+function VoiceLibraryView({ onOpenStudio, voiceProfiles, selectedVoiceId, onSelectVoice, onVoiceCreated }: { onOpenStudio: () => void; voiceProfiles: VoiceProfile[]; selectedVoiceId: string | null; onSelectVoice: (id: string) => void; onVoiceCreated: (profile: VoiceProfile) => void }) {
+  const voices = voiceProfiles.map(voiceToCard);
   const [showAnalyzer, setShowAnalyzer] = useState(false);
 
-  useEffect(() => {
-    const client = getLocalEngineClient();
-    if (!client) return;
-    client.listVoices().then((profiles: VoiceProfile[]) => {
-      if (profiles.length === 0) return;
-      setVoices(profiles.map(voiceToCard));
-    }).catch(() => undefined);
-  }, []);
-
-  const selected = voices.find((voice) => voice.id === selectedVoice) ?? voices[0];
+  const selected = voices.find((voice) => voice.id === selectedVoiceId);
   return (
     <div className="voice-library-grid">
       <section className="voice-library-panel reveal-card">
         <div className="library-head"><div><span className="tiny-label">VOICE LIBRARY / {voices.length.toString().padStart(2, "0")} PROFILES</span><h2>Find the voice before the line.</h2></div><button className="primary-button" type="button" onClick={() => setShowAnalyzer(true)}><span className="button-spark">+</span> Add reference</button></div>
         <div className="voice-card-list">
-          {voices.map((voice) => <button className={`voice-card voice-${voice.tone} ${selected?.id === voice.id ? "selected" : ""}`} key={voice.id} type="button" onClick={() => setSelectedVoice(voice.id)}><span className="voice-card-orb">{voice.name.slice(0, 2).toUpperCase()}</span><span className="voice-card-copy"><strong>{voice.name}</strong><small>{voice.detail}</small><em>{voice.tag}</em></span><span className="voice-score"><b>{voice.score || "--"}</b><small>SCORE</small></span></button>)}
+          {voices.length === 0 ? <p className="empty-library">Add a reference to create a voice profile.</p> : voices.map((voice) => <button className={`voice-card voice-${voice.tone} ${selected?.id === voice.id ? "selected" : ""}`} key={voice.id} type="button" onClick={() => onSelectVoice(voice.id)}><span className="voice-card-orb">{voice.name.slice(0, 2).toUpperCase()}</span><span className="voice-card-copy"><strong>{voice.name}</strong><small>{voice.detail}</small><em>{voice.tag}</em></span><span className="voice-score"><b>{voice.score || "--"}</b><small>SCORE</small></span></button>)}
         </div>
         <div className="library-footer"><span>References are local by default.</span><button type="button" onClick={onOpenStudio}>Use selected voice in Studio -&gt;</button></div>
       </section>
@@ -671,8 +868,7 @@ function VoiceLibraryView({ onOpenStudio }: { onOpenStudio: () => void }) {
         <ReferenceAnalyzerPanel
           onClose={() => setShowAnalyzer(false)}
           onCreated={(profile) => {
-            setVoices((current) => [voiceToCard(profile), ...current.filter((voice) => voice.id !== profile.id)]);
-            setSelectedVoice(profile.id);
+            onVoiceCreated(profile);
           }}
         />
       )}

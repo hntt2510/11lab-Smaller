@@ -76,6 +76,12 @@ class OmniVoiceProvider(TTSProvider):
                 pass
 
     def generate(self, request: TTSRequest) -> TTSResult:
+        from omnivoice.utils.voice_design import resolve_instruct
+
+        safe_instruct = resolve_instruct(
+            request.instruct,
+            use_zh=any("\u4e00" <= character <= "\u9fff" for character in request.text),
+        )
         with self._lock:
             self.load()
             model = self._model
@@ -89,8 +95,8 @@ class OmniVoiceProvider(TTSProvider):
                 kwargs["ref_audio"] = request.ref_audio
             if request.ref_text is not None:
                 kwargs["ref_text"] = request.ref_text
-            if request.instruct is not None:
-                kwargs["instruct"] = request.instruct
+            if safe_instruct is not None:
+                kwargs["instruct"] = safe_instruct
             if request.duration is not None:
                 kwargs["duration"] = request.duration
             if request.speed is not None:

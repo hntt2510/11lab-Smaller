@@ -19,10 +19,23 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0"
 
-from omnivoice.models.omnivoice import (
-    OmniVoice,
-    OmniVoiceConfig,
-    OmniVoiceGenerationConfig,
-)
-
 __all__ = ["OmniVoice", "OmniVoiceConfig", "OmniVoiceGenerationConfig"]
+
+
+def __getattr__(name: str):
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from omnivoice.models.omnivoice import (
+        OmniVoice,
+        OmniVoiceConfig,
+        OmniVoiceGenerationConfig,
+    )
+
+    exports = {
+        "OmniVoice": OmniVoice,
+        "OmniVoiceConfig": OmniVoiceConfig,
+        "OmniVoiceGenerationConfig": OmniVoiceGenerationConfig,
+    }
+    globals().update(exports)
+    return exports[name]

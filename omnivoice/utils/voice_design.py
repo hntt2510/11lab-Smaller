@@ -22,7 +22,9 @@ translation/validation utilities between English and Chinese. Used by
 ``OmniVoice.generate()`` for voice design mode.
 """
 
+import difflib
 import re
+from typing import Optional
 
 _ZH_RE = re.compile(r"[\u4e00-\u9fff]")
 
@@ -95,3 +97,74 @@ _INSTRUCT_ALL_VALID = (
 
 _INSTRUCT_VALID_EN = frozenset(i for i in _INSTRUCT_ALL_VALID if not _ZH_RE.search(i))
 _INSTRUCT_VALID_ZH = frozenset(i for i in _INSTRUCT_ALL_VALID if _ZH_RE.search(i))
+
+
+def resolve_instruct(instruct: Optional[str], use_zh: bool = False) -> str | None:
+    """Validate and normalize a voice-design instruct using OmniVoice's vocabulary."""
+    if instruct is None:
+        return None
+
+    instruct_str = instruct.strip()
+    if not instruct_str:
+        return None
+
+    raw_items = [item for item in re.split(r"\s*[,，]\s*", instruct_str) if item]
+    unknown = []
+    normalized = []
+    for raw in raw_items:
+        item = raw.strip().lower()
+        if item in _INSTRUCT_ALL_VALID:
+            normalized.append(item)
+        else:
+            suggestion = difflib.get_close_matches(
+                item, _INSTRUCT_ALL_VALID, n=1, cutoff=0.6
+            )
+            unknown.append((raw, item, suggestion[0] if suggestion else None))
+
+    if unknown:
+        details = []
+        for raw, item, suggestion in unknown:
+            if suggestion:
+                details.append(
+                    f"  '{raw}' -> '{item}' (unsupported; did you mean '{suggestion}'?)"
+                )
+            else:
+                details.append(f"  '{raw}' -> '{item}' (unsupported)")
+        raise ValueError(
+            f"Unsupported instruct items found in {instruct_str}:\n"
+            + "\n".join(details)
+            + "\n\nValid English items: "
+            + ", ".join(sorted(_INSTRUCT_VALID_EN))
+            + "\nValid Chinese items: "
+            + "，".join(sorted(_INSTRUCT_VALID_ZH))
+        )
+
+    has_dialect = any(item.endswith("话") for item in normalized)
+    has_accent = any(" accent" in item for item in normalized)
+    if has_dialect and has_accent:
+        raise ValueError(
+            "Cannot mix Chinese dialect and English accent in a single instruct."
+        )
+    if has_dialect:
+        use_zh = True
+    elif has_accent:
+        use_zh = False
+
+    if use_zh:
+        normalized = [_INSTRUCT_EN_TO_ZH.get(item, item) for item in normalized]
+    else:
+        normalized = [_INSTRUCT_ZH_TO_EN.get(item, item) for item in normalized]
+
+    conflicts = []
+    for category in _INSTRUCT_MUTUALLY_EXCLUSIVE:
+        matches = [item for item in normalized if item in category]
+        if len(matches) > 1:
+            conflicts.append(matches)
+    if conflicts:
+        raise ValueError(
+            "Conflicting instruct items within the same category: "
+            + "; ".join(" vs ".join(f"'{item}'" for item in group) for group in conflicts)
+        )
+
+    separator = "，" if any(_ZH_RE.search(item) for item in normalized) else ", "
+    return separator.join(normalized)

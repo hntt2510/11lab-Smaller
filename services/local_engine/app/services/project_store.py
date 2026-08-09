@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -26,6 +27,9 @@ class ProjectDocument:
     segments: tuple[dict[str, Any], ...]
     pronunciation_entries: tuple[dict[str, Any], ...]
     updated_at: str
+    generation_mode: str = "single_narrator"
+    speaker_voice_map: dict[str, str] = field(default_factory=dict)
+    selected_narrator_voice_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +38,9 @@ class ProjectDocument:
             "source": self.source,
             "segments": [dict(segment) for segment in self.segments],
             "pronunciation_entries": [dict(entry) for entry in self.pronunciation_entries],
+            "generation_mode": self.generation_mode,
+            "speaker_voice_map": dict(self.speaker_voice_map),
+            "selected_narrator_voice_id": self.selected_narrator_voice_id,
             "updated_at": self.updated_at,
         }
 
@@ -106,6 +113,9 @@ class ProjectStore:
         source: str,
         segments: Iterable[dict[str, Any]],
         pronunciation_entries: Iterable[dict[str, Any]] = (),
+        generation_mode: str = "single_narrator",
+        speaker_voice_map: dict[str, str] | None = None,
+        selected_narrator_voice_id: str | None = None,
     ) -> ProjectDocument:
         updated_at = _now()
         segment_list = [dict(segment) for segment in segments]
@@ -114,8 +124,9 @@ class ProjectStore:
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO projects (
-                    id, name, source, segments_json, pronunciation_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    id, name, source, segments_json, pronunciation_json, generation_mode,
+                    speaker_voice_map_json, selected_narrator_voice_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -123,6 +134,9 @@ class ProjectStore:
                     source,
                     json.dumps(segment_list),
                     json.dumps(pronunciation_list),
+                    generation_mode,
+                    json.dumps(speaker_voice_map or {}),
+                    selected_narrator_voice_id,
                     updated_at,
                 ),
             )
@@ -133,6 +147,9 @@ class ProjectStore:
             source=source,
             segments=tuple(segment_list),
             pronunciation_entries=tuple(pronunciation_list),
+            generation_mode=generation_mode,
+            speaker_voice_map=dict(speaker_voice_map or {}),
+            selected_narrator_voice_id=selected_narrator_voice_id,
             updated_at=updated_at,
         )
 
@@ -149,6 +166,9 @@ class ProjectStore:
             source=row["source"],
             segments=tuple(json.loads(row["segments_json"])),
             pronunciation_entries=tuple(json.loads(row["pronunciation_json"])),
+            generation_mode=row["generation_mode"],
+            speaker_voice_map=json.loads(row["speaker_voice_map_json"]),
+            selected_narrator_voice_id=row["selected_narrator_voice_id"],
             updated_at=row["updated_at"],
         )
 
@@ -169,6 +189,49 @@ class ProjectStore:
             )
             self._connection.commit()
         return entry
+
+    def save_take(
+        self,
+        project_id: str,
+        segment_id: str,
+        output_path: str,
+        request_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        take = {
+            "id": f"take-{secrets.token_urlsafe(12)}",
+            "project_id": project_id,
+            "segment_id": segment_id,
+            "output_path": output_path,
+            "request_snapshot": dict(request_snapshot),
+            "created_at": _now(),
+        }
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO takes (id, project_id, segment_id, output_path,
+                    request_snapshot_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (take["id"], take["project_id"], take["segment_id"], take["output_path"],
+                 json.dumps(take["request_snapshot"]), take["created_at"]),
+            )
+            self._connection.commit()
+        return take
+
+    def list_takes(self, project_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM takes WHERE project_id = ? ORDER BY created_at, id", (project_id,)
+            ).fetchall()
+        return [
+            {
+                "id": row["id"], "project_id": row["project_id"],
+                "segment_id": row["segment_id"], "output_path": row["output_path"],
+                "request_snapshot": json.loads(row["request_snapshot_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def list_pronunciations(self, project_id: str | None = None) -> list[PronunciationEntry]:
         query = "SELECT * FROM pronunciation_entries"
@@ -228,7 +291,18 @@ class ProjectStore:
                     source TEXT NOT NULL,
                     segments_json TEXT NOT NULL,
                     pronunciation_json TEXT NOT NULL,
+                    generation_mode TEXT NOT NULL DEFAULT 'single_narrator',
+                    speaker_voice_map_json TEXT NOT NULL DEFAULT '{}',
+                    selected_narrator_voice_id TEXT,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS takes (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    segment_id TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    request_snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS pronunciation_entries (
                     id TEXT PRIMARY KEY,
@@ -242,6 +316,15 @@ class ProjectStore:
                 );
                 """
             )
+            for statement in (
+                "ALTER TABLE projects ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'single_narrator'",
+                "ALTER TABLE projects ADD COLUMN speaker_voice_map_json TEXT NOT NULL DEFAULT '{}'",
+                "ALTER TABLE projects ADD COLUMN selected_narrator_voice_id TEXT",
+            ):
+                try:
+                    self._connection.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
             self._connection.commit()
 
     @staticmethod

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420",
+    "test:studio": "vitest run src/lib/segment-state.test.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -23,6 +24,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.6"
+    "vite": "^7.0.6",
+    "vitest": "^4.1.10"
   }
 }

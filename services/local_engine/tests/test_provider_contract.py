@@ -14,6 +14,7 @@ from services.local_engine.app.providers.base import (
     TTSResult,
     VoiceProfile,
 )
+from services.local_engine.app.providers.omnivoice_provider import OmniVoiceProvider
 from services.local_engine.app.queue import RenderQueue
 from services.local_engine.app.services.project_store import ProjectStore
 from services.local_engine.app.services.reference_analyzer import analyze_reference
@@ -21,6 +22,9 @@ from services.local_engine.app.services.script_director import parse_script
 
 
 class FakeProvider(TTSProvider):
+    def __init__(self):
+        self.requests: list[TTSRequest] = []
+
     @property
     def name(self):
         return "fake"
@@ -36,6 +40,7 @@ class FakeProvider(TTSProvider):
         pass
 
     def generate(self, request):
+        self.requests.append(request)
         return TTSResult(
             audio=np.zeros(16, dtype=np.float32),
             sampling_rate=24000,
@@ -43,7 +48,12 @@ class FakeProvider(TTSProvider):
         )
 
     def create_voice_profile(self, reference_audio, reference_transcript=None, metadata=None):
-        return VoiceProfile(id="voice-test", provider=self.name)
+        return VoiceProfile(
+            id=f"voice-{Path(reference_audio or 'empty').stem}",
+            provider=self.name,
+            reference_audio=reference_audio,
+            reference_transcript=reference_transcript,
+        )
 
     def get_capabilities(self):
         return {"modes": ["auto"]}
@@ -148,6 +158,85 @@ class ProviderContractTest(unittest.TestCase):
         self.assertEqual(segments[2].native_tags, ("laughter",))
         self.assertIn("[laughter]", segments[2].text)
 
+    def test_dialogue_parser_preserves_speakers_and_studio_tags(self):
+        segments = parse_script(
+            "A: [calm speed=0.90] Keep calm.\nB: Okay.\n"
+            "The time was 10:30 that night.",
+            dialogue=True,
+        )
+
+        self.assertEqual([segment.speaker for segment in segments], ["A", "B", None])
+        self.assertEqual(segments[0].text, "Keep calm.")
+        self.assertEqual(segments[0].emotion, "calm")
+        self.assertIsNone(segments[0].instruct)
+        self.assertEqual(segments[0].speed, 0.90)
+        self.assertIn("requires a voice assignment", segments[2].warnings[0])
+
+    def test_parser_preserves_speed_instruction_and_pending_pause(self):
+        segments = parse_script(
+            "[pause=500]\n[excited speed=1.08] Hello [laughter] world.",
+        )
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].text, "Hello [laughter] world.")
+        self.assertEqual(segments[0].emotion, "excited")
+        self.assertIsNone(segments[0].instruct)
+        self.assertEqual(segments[0].speed, 1.08)
+        self.assertEqual(segments[0].pause_before_ms, 500)
+        self.assertEqual(segments[0].native_tags, ("laughter",))
+
+    def test_studio_presets_keep_emotion_without_unsupported_instruct(self):
+        expected = {
+            "calm": 0.92,
+            "excited": 1.05,
+            "sad": 0.88,
+            "serious": 0.94,
+            "emphasis": 1.0,
+            "slow": 0.82,
+            "fast": 1.12,
+        }
+        for emotion, speed in expected.items():
+            segment = parse_script(f"[{emotion}] Hello.")[0]
+            self.assertEqual(segment.emotion, emotion)
+            self.assertIsNone(segment.instruct)
+            self.assertEqual(segment.speed, speed)
+
+    def test_calm_parser_result_has_no_provider_instruct(self):
+        segment = parse_script("[calm speed=0.92] Hello.")[0]
+
+        self.assertEqual(segment.emotion, "calm")
+        self.assertIsNone(segment.instruct)
+        self.assertEqual(segment.speed, 0.92)
+
+    def test_excited_parser_result_has_no_provider_instruct(self):
+        segment = parse_script("[excited speed=1.37] Hello.")[0]
+
+        self.assertEqual(segment.emotion, "excited")
+        self.assertIsNone(segment.instruct)
+        self.assertEqual(segment.speed, 1.37)
+
+    def test_whisper_preset_remains_a_valid_provider_instruct(self):
+        segment = parse_script("[whisper speed=0.83] Hello.")[0]
+
+        self.assertEqual(segment.emotion, "whisper")
+        self.assertEqual(segment.instruct, "whisper")
+        self.assertEqual(segment.speed, 0.83)
+
+    def test_studio_preset_api_matches_parser_metadata(self):
+        client = TestClient(create_app(FakeProvider(), token="secret"))
+        response = client.get(
+            "/script/presets", headers={"Authorization": "Bearer secret"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        presets = response.json()
+        calm = parse_script("[calm] Hello.")[0]
+        whisper = parse_script("[whisper] Hello.")[0]
+        self.assertEqual(calm.speed, presets["calm"]["speed"])
+        self.assertEqual(calm.pause_after_ms, presets["calm"]["pause_after_ms"])
+        self.assertIsNone(calm.instruct)
+        self.assertEqual(whisper.instruct, presets["whisper"]["instruct"])
+
     def test_voice_reference_and_project_api_persist(self):
         with TemporaryDirectory() as workspace:
             reference_path = Path(workspace) / "reference.wav"
@@ -219,6 +308,235 @@ class ProviderContractTest(unittest.TestCase):
                     headers=headers,
                 )
                 self.assertEqual(preview.json()["text"], "ess ay pee is ready")
+
+    def test_generation_uses_the_reference_of_each_selected_voice(self):
+        with TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            first_reference = workspace_path / "first.wav"
+            second_reference = workspace_path / "second.wav"
+            waveform = np.sin(np.linspace(0, 20, 24000)).astype(np.float32)
+            first_reference.write_bytes(encode_wav(waveform, 24000))
+            second_reference.write_bytes(encode_wav(waveform, 24000))
+
+            provider = FakeProvider()
+            store = ProjectStore(workspace)
+            with TestClient(create_app(provider, token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                profiles = []
+                for name, reference, transcript in (
+                    ("Voice A", first_reference, "First reference transcript"),
+                    ("Voice B", second_reference, "Second reference transcript"),
+                ):
+                    response = client.post(
+                        "/voices",
+                        json={
+                            "name": name,
+                            "reference_audio": str(reference),
+                            "reference_transcript": transcript,
+                            "consent_confirmed": True,
+                        },
+                        headers=headers,
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    profiles.append(response.json())
+
+                for profile in profiles:
+                    response = client.post(
+                        "/generate",
+                        json={
+                            "text": "Generate with this voice",
+                            "ref_audio": profile["reference_audio"],
+                            "ref_text": profile["reference_transcript"],
+                        },
+                        headers=headers,
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+            self.assertEqual(provider.requests[0].ref_audio, str(first_reference))
+            self.assertEqual(provider.requests[0].ref_text, "First reference transcript")
+            self.assertEqual(provider.requests[1].ref_audio, str(second_reference))
+            self.assertEqual(provider.requests[1].ref_text, "Second reference transcript")
+
+    def test_generation_preserves_safe_segment_controls_and_selected_voice_reference(self):
+        with TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            first_reference = workspace_path / "voice-a.wav"
+            second_reference = workspace_path / "voice-b.wav"
+            waveform = np.sin(np.linspace(0, 20, 24000)).astype(np.float32)
+            first_reference.write_bytes(encode_wav(waveform, 24000))
+            second_reference.write_bytes(encode_wav(waveform, 24000))
+
+            provider = FakeProvider()
+            store = ProjectStore(workspace)
+            with TestClient(create_app(provider, token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                for name, reference in (("Voice A", first_reference), ("Voice B", second_reference)):
+                    response = client.post(
+                        "/voices",
+                        json={
+                            "name": name,
+                            "reference_audio": str(reference),
+                            "consent_confirmed": True,
+                        },
+                        headers=headers,
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+                for source in (
+                    "[calm speed=0.92] Hello world.",
+                    "[excited speed=1.25] Hello world.",
+                    "[whisper speed=0.91] Hello world.",
+                ):
+                    segment = parse_script(source)[0]
+                    response = client.post(
+                        "/generate",
+                        json={
+                            "text": segment.text,
+                            "instruct": segment.instruct,
+                            "speed": 1.37 if segment.emotion == "calm" else segment.speed,
+                            "ref_audio": str(second_reference),
+                            "options": {"guidance_scale": 2.73},
+                        },
+                        headers=headers,
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+            self.assertEqual([request.instruct for request in provider.requests], [None, None, "whisper"])
+            self.assertEqual([request.speed for request in provider.requests], [1.37, 1.25, 0.91])
+            self.assertTrue(all(request.options["guidance_scale"] == 2.73 for request in provider.requests))
+            self.assertTrue(all(request.ref_audio == str(second_reference) for request in provider.requests))
+
+    def test_omnivoice_provider_rejects_invalid_instruct_before_model_inference(self):
+        class CapturingModel:
+            sampling_rate = 24000
+
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, text, **kwargs):
+                self.calls.append((text, kwargs))
+                return [np.zeros(16, dtype=np.float32)]
+
+        provider = OmniVoiceProvider()
+        model = CapturingModel()
+        provider._model = model
+
+        with self.assertRaisesRegex(ValueError, "Unsupported instruct items"):
+            provider.generate(TTSRequest(text="Hello", instruct="calm"))
+        self.assertEqual(model.calls, [])
+
+        provider.generate(TTSRequest(text="Hello", instruct="whisper"))
+        self.assertEqual(model.calls[0][1]["instruct"], "whisper")
+
+    def test_project_save_preserves_parsed_segment_metadata(self):
+        with TemporaryDirectory() as workspace:
+            store = ProjectStore(workspace)
+            with TestClient(create_app(FakeProvider(), token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                parsed = client.post(
+                    "/script/parse",
+                    json={"source": "[pause=777]\n[excited speed=1.37] Hello."},
+                    headers=headers,
+                )
+                self.assertEqual(parsed.status_code, 200)
+                segments = parsed.json()["segments"]
+
+                saved = client.put(
+                    "/projects/segment-metadata",
+                    json={"name": "Segment metadata", "source": "source", "segments": segments},
+                    headers=headers,
+                )
+                self.assertEqual(saved.status_code, 200)
+                project = client.get("/projects/segment-metadata", headers=headers)
+                self.assertEqual(project.status_code, 200)
+
+            segment = project.json()["segments"][0]
+            self.assertEqual(segment["text"], "Hello.")
+            self.assertEqual(segment["emotion"], "excited")
+            self.assertIsNone(segment["instruct"])
+            self.assertEqual(segment["speed"], 1.37)
+            self.assertEqual(segment["pause_before_ms"], 777)
+
+    def test_project_save_preserves_inspector_edits(self):
+        with TemporaryDirectory() as workspace:
+            store = ProjectStore(workspace)
+            segment = parse_script("[calm] Hello.")[0].to_dict()
+            segment.update(
+                speed=1.37,
+                guidance=2.73,
+                pause_before_ms=777,
+                pause_after_ms=333,
+                volume=0.88,
+            )
+            with TestClient(create_app(FakeProvider(), token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                response = client.put(
+                    "/projects/inspector-edits",
+                    json={"name": "Inspector edits", "source": "source", "segments": [segment]},
+                    headers=headers,
+                )
+                self.assertEqual(response.status_code, 200)
+                project = client.get("/projects/inspector-edits", headers=headers)
+                self.assertEqual(project.status_code, 200)
+
+            saved = project.json()["segments"][0]
+            self.assertEqual(saved["speed"], 1.37)
+            self.assertEqual(saved["guidance"], 2.73)
+            self.assertEqual(saved["pause_before_ms"], 777)
+            self.assertEqual(saved["pause_after_ms"], 333)
+            self.assertEqual(saved["volume"], 0.88)
+
+    def test_project_persists_generation_mode_mapping_and_appended_takes(self):
+        with TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            output_path = workspace_path / "generated.wav"
+            output_path.write_bytes(encode_wav(np.zeros(16, dtype=np.float32), 24000))
+            store = ProjectStore(workspace)
+            with TestClient(create_app(FakeProvider(), token="secret", project_store=store)) as client:
+                headers = {"Authorization": "Bearer secret"}
+                saved = client.put(
+                    "/projects/dialogue",
+                    json={
+                        "name": "Dialogue",
+                        "source": "A: One.\nB: Two.",
+                        "segments": [
+                            {"id": "segment-01", "speaker": "A", "text": "One."},
+                            {"id": "segment-02", "speaker": "B", "text": "Two."},
+                        ],
+                        "generation_mode": "dialogue",
+                        "speaker_voice_map": {"A": "voice-adam", "B": "voice-bella"},
+                        "selected_narrator_voice_id": "voice-adam",
+                    },
+                    headers=headers,
+                )
+                self.assertEqual(saved.status_code, 200)
+                first_take = client.post(
+                    "/projects/dialogue/takes",
+                    json={
+                        "segment_id": "segment-01",
+                        "output_path": str(output_path),
+                        "request_snapshot": {"speed": 1.37, "ref_audio": "adam.wav"},
+                    },
+                    headers=headers,
+                )
+                second_take = client.post(
+                    "/projects/dialogue/takes",
+                    json={
+                        "segment_id": "segment-01",
+                        "output_path": str(output_path),
+                        "request_snapshot": {"speed": 1.43, "ref_audio": "adam.wav"},
+                    },
+                    headers=headers,
+                )
+                project = client.get("/projects/dialogue", headers=headers)
+                takes = client.get("/projects/dialogue/takes", headers=headers)
+
+            self.assertEqual(first_take.status_code, 200)
+            self.assertEqual(second_take.status_code, 200)
+            self.assertNotEqual(first_take.json()["id"], second_take.json()["id"])
+            self.assertEqual(project.json()["generation_mode"], "dialogue")
+            self.assertEqual(project.json()["speaker_voice_map"], {"A": "voice-adam", "B": "voice-bella"})
+            self.assertEqual([take["request_snapshot"]["speed"] for take in takes.json()], [1.37, 1.43])
 
 
 if __name__ == "__main__":

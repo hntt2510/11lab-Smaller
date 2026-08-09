@@ -30,7 +30,7 @@ from .services.pronunciation_service import (
 )
 from .services.project_store import ProjectStore
 from .services.reference_analyzer import analyze_reference
-from .services.script_director import parse_script
+from .services.script_director import STUDIO_PRESETS, parse_script
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ class ScriptParseRequest(BaseModel):
 
     source: str = Field(min_length=1)
     default_voice_id: str | None = None
+    mode: Literal["dialogue", "single_narrator"] = "single_narrator"
 
 
 class ReferenceAnalyzeRequest(BaseModel):
@@ -105,6 +106,17 @@ class ProjectSaveRequest(BaseModel):
     source: str = ""
     segments: list[dict[str, Any]] = Field(default_factory=list)
     pronunciation_entries: list[dict[str, Any]] = Field(default_factory=list)
+    generation_mode: Literal["dialogue", "single_narrator"] = "single_narrator"
+    speaker_voice_map: dict[str, str] = Field(default_factory=dict)
+    selected_narrator_voice_id: str | None = None
+
+
+class TakeCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_id: str = Field(min_length=1)
+    output_path: str = Field(min_length=1)
+    request_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class PronunciationCreateRequest(BaseModel):
@@ -259,13 +271,21 @@ def create_app(
     @app.post("/script/parse", dependencies=[Depends(require_token)])
     def parse_script_route(payload: ScriptParseRequest) -> dict[str, Any]:
         try:
-            segments = parse_script(payload.source, payload.default_voice_id)
+            segments = parse_script(
+                payload.source,
+                payload.default_voice_id,
+                dialogue=payload.mode == "dialogue",
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {
             "segments": [segment.to_dict() for segment in segments],
             "suspicious_terms": find_suspicious_terms(payload.source),
         }
+
+    @app.get("/script/presets", dependencies=[Depends(require_token)])
+    def script_presets() -> dict[str, dict[str, Any]]:
+        return {name: dict(values) for name, values in STUDIO_PRESETS.items()}
 
     @app.post("/references/analyze", dependencies=[Depends(require_token)])
     def analyze_reference_route(payload: ReferenceAnalyzeRequest) -> dict[str, Any]:
@@ -400,8 +420,40 @@ def create_app(
             payload.source,
             payload.segments,
             payload.pronunciation_entries,
+            payload.generation_mode,
+            payload.speaker_voice_map,
+            payload.selected_narrator_voice_id,
         )
         return project.to_dict()
+
+    @app.post("/projects/{project_id}/takes", dependencies=[Depends(require_token)])
+    def create_take(
+        project_id: str,
+        payload: TakeCreateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        store: ProjectStore | None = request.app.state.project_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Project store is disabled")
+        workspace: Path | None = request.app.state.workspace
+        if workspace is None:
+            raise HTTPException(status_code=503, detail="Workspace is disabled")
+        output_path = Path(payload.output_path).expanduser().resolve()
+        if not output_path.is_relative_to(workspace) or not output_path.is_file():
+            raise HTTPException(status_code=422, detail="take output must be an existing workspace file")
+        return store.save_take(
+            project_id,
+            payload.segment_id,
+            str(output_path),
+            payload.request_snapshot,
+        )
+
+    @app.get("/projects/{project_id}/takes", dependencies=[Depends(require_token)])
+    def list_takes(project_id: str, request: Request) -> list[dict[str, Any]]:
+        store: ProjectStore | None = request.app.state.project_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Project store is disabled")
+        return store.list_takes(project_id)
 
     @app.get("/projects/{project_id}", dependencies=[Depends(require_token)])
     def get_project(project_id: str, request: Request) -> dict[str, Any]:
