@@ -1,4 +1,4 @@
-import type { GenerationMode, ScriptSegment, StudioPreset } from "./local-engine";
+import type { GenerationMode, ScriptSegment, StudioPreset, Take } from "./local-engine";
 
 export type EditableSegmentPatch = Partial<Pick<ScriptSegment,
   "speed" | "duration" | "guidance" | "pause_before_ms" | "pause_after_ms" | "volume"
@@ -12,6 +12,21 @@ export function updateSegmentById(
   return segments.map((segment) => (
     segment.id === segmentId ? { ...segment, ...patch } : segment
   ));
+}
+
+export function selectTakeForSegment(
+  segments: ScriptSegment[],
+  segmentId: string,
+  takeId: string,
+): ScriptSegment[] {
+  return segments.map((segment) => (
+    segment.id === segmentId ? { ...segment, selected_take: takeId } : segment
+  ));
+}
+
+export function resolveSelectedTake(segment: ScriptSegment | null, takes: Take[]): Take | null {
+  if (!segment?.selected_take) return null;
+  return takes.find((take) => take.id === segment.selected_take && take.segment_id === segment.id) ?? null;
 }
 
 export function applyStudioPresetToSegment(

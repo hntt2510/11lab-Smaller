@@ -13,7 +13,7 @@ import {
   getLocalEngineClient,
 } from "./lib/local-engine";
 import type { AudioEditOptions } from "./lib/local-engine";
-import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveSegmentVoiceId, updateSegmentById } from "./lib/segment-state";
+import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./lib/segment-state";
 import { WaveformEditor } from "./components/WaveformEditor";
 
 gsap.registerPlugin(useGSAP);
@@ -176,8 +176,10 @@ function App() {
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("ready");
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [previewAudioPath, setPreviewAudioPath] = useState<string | null>(null);
+  const [previewedSegmentId, setPreviewedSegmentId] = useState<string | null>(null);
+  const [previewedTakeId, setPreviewedTakeId] = useState<string | null>(null);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [studioPresets, setStudioPresets] = useState<Record<string, StudioPreset> | null>(null);
   const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null);
@@ -231,9 +233,9 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      if (previewAudioUrl) URL.revokeObjectURL(previewAudioUrl);
     };
-  }, [audioUrl]);
+  }, [previewAudioUrl]);
 
   useEffect(() => {
     const client = getLocalEngineClient();
@@ -270,6 +272,42 @@ function App() {
   const selectedVoice = effectiveVoiceId
     ? voiceProfiles.find((profile) => profile.id === effectiveVoiceId) ?? null
     : null;
+  const selectedTake = resolveSelectedTake(selectedSegment, takes);
+  const isSelectedTakePreviewed = Boolean(selectedTake)
+    && previewedSegmentId === selectedSegmentId
+    && previewedTakeId === selectedTake.id;
+  const selectedPreviewAudioUrl = isSelectedTakePreviewed ? previewAudioUrl : null;
+  const selectedPreviewAudioPath = isSelectedTakePreviewed ? previewAudioPath : null;
+
+  useEffect(() => {
+    const client = getLocalEngineClient();
+    if (!selectedSegment || !selectedTake || !client) {
+      setPreviewedSegmentId(selectedSegmentId);
+      setPreviewedTakeId(null);
+      setPreviewAudioPath(null);
+      setPreviewAudioUrl(null);
+      return;
+    }
+    if (previewedSegmentId === selectedSegment.id && previewedTakeId === selectedTake.id) return;
+
+    let cancelled = false;
+    setPreviewedSegmentId(selectedSegment.id);
+    setPreviewedTakeId(selectedTake.id);
+    setPreviewAudioPath(null);
+    setPreviewAudioUrl(null);
+    client.fetchAudio(selectedTake.output_path)
+      .then((blob) => {
+        if (cancelled) return;
+        setPreviewAudioPath(selectedTake.output_path);
+        setPreviewAudioUrl(URL.createObjectURL(blob));
+      })
+      .catch(() => {
+        if (!cancelled) setToast("Selected take audio is unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSegmentId, selectedSegment?.id, selectedTake?.id, selectedTake?.output_path]);
 
   const dialogueSpeakers = Array.from(new Set(
     scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
@@ -282,6 +320,11 @@ function App() {
   const updateSelectedSegment = contextSafe((patch: Partial<Pick<ScriptSegment, "speed" | "duration" | "guidance" | "pause_before_ms" | "pause_after_ms" | "volume">>) => {
     if (!selectedSegmentId) return;
     setScriptSegments((current) => updateSegmentById(current, selectedSegmentId, patch));
+  });
+
+  const selectTake = contextSafe((take: Take) => {
+    if (take.segment_id !== selectedSegmentId) return;
+    setScriptSegments((current) => selectTakeForSegment(current, take.segment_id, take.id));
   });
 
   const applyStudioPreset = contextSafe((emotion: string) => {
@@ -379,10 +422,6 @@ function App() {
     setScriptSegments((current) => current.map((item) => item.id === segment.id
       ? { ...item, selected_take: take.id, render_status: "complete" }
       : item));
-    if (selectedSegmentId === segment.id) {
-      setAudioPath(generated.outputPath);
-      setAudioUrl(URL.createObjectURL(generated.blob));
-    }
     return { take, voice };
   };
 
@@ -441,15 +480,15 @@ function App() {
 
   const processAudioEdit = contextSafe(async (options: Omit<AudioEditOptions, "source_path">) => {
     const client = getLocalEngineClient();
-    if (!client || !audioPath) {
+    if (!client || !selectedPreviewAudioPath) {
       setToast("Generate a local take before applying waveform edits");
       return;
     }
     try {
-      const result = await client.processAudio({ ...options, source_path: audioPath, output_format: "wav" });
+      const result = await client.processAudio({ ...options, source_path: selectedPreviewAudioPath, output_format: "wav" });
       const blob = await client.fetchAudio(result.output_path);
-      setAudioPath(result.output_path);
-      setAudioUrl(URL.createObjectURL(blob));
+      setPreviewAudioPath(result.output_path);
+      setPreviewAudioUrl(URL.createObjectURL(blob));
       setToast(result.warnings.length ? result.warnings[0] : "Waveform edit applied");
     } catch {
       setToast("Audio edit failed; keeping the current take");
@@ -458,12 +497,12 @@ function App() {
 
   const runQualityCheck = contextSafe(async () => {
     const client = getLocalEngineClient();
-    if (!client || !audioPath) {
+    if (!client || !selectedPreviewAudioPath) {
       setToast("Generate a local take before running quality check");
       return;
     }
     try {
-      const result = await client.qualityCheck(audioPath);
+      const result = await client.qualityCheck(selectedPreviewAudioPath);
       setToast(result.passed ? "Quality check passed" : result.warnings.join(" / "));
     } catch {
       setToast("Quality checker is unavailable");
@@ -472,12 +511,12 @@ function App() {
 
   const exportMp3 = contextSafe(async () => {
     const client = getLocalEngineClient();
-    if (!client || !audioPath) {
+    if (!client || !selectedPreviewAudioPath) {
       setToast("Generate a local take before exporting MP3");
       return;
     }
     try {
-      const result = await client.processAudio({ source_path: audioPath, output_format: "mp3", preset: "Raw" });
+      const result = await client.processAudio({ source_path: selectedPreviewAudioPath, output_format: "mp3", preset: "Raw" });
       downloadBlob(await client.fetchAudio(result.output_path), "episode-01.mp3");
       setToast("MP3 export downloaded");
     } catch {
@@ -487,12 +526,12 @@ function App() {
 
   const exportWav = contextSafe(async () => {
     const client = getLocalEngineClient();
-    if (!client || !audioPath) {
+    if (!client || !selectedPreviewAudioPath) {
       setToast("Generate a local take before exporting WAV");
       return;
     }
     try {
-      downloadBlob(await client.fetchAudio(audioPath), "episode-01.wav");
+      downloadBlob(await client.fetchAudio(selectedPreviewAudioPath), "episode-01.wav");
       setToast("WAV export downloaded");
     } catch {
       setToast("WAV export failed");
@@ -607,7 +646,7 @@ function App() {
               selectedSegmentId={selectedSegmentId}
               renderStatus={renderStatus}
               onGenerate={generateTake}
-              audioUrl={audioUrl}
+              audioUrl={selectedPreviewAudioUrl}
               onProcessEdit={processAudioEdit}
               onQualityCheck={runQualityCheck}
               onExportWav={exportWav}
@@ -652,7 +691,7 @@ function App() {
           </div>
         </div>
         {activeView === "studio" ? (
-          <StudioInspector renderStatus={renderStatus} onGenerate={generateTake} selectedSegment={selectedSegment} selectedVoice={selectedVoice} selectedVoiceId={effectiveVoiceId} presets={studioPresets} takes={takes} onUpdateSegment={updateSelectedSegment} onApplyPreset={applyStudioPreset} />
+          <StudioInspector renderStatus={renderStatus} onGenerate={generateTake} selectedSegment={selectedSegment} selectedVoice={selectedVoice} selectedVoiceId={effectiveVoiceId} presets={studioPresets} takes={takes} onSelectTake={selectTake} onUpdateSegment={updateSelectedSegment} onApplyPreset={applyStudioPreset} />
         ) : (
           <DiagnosticsMini onOpen={() => setShowDiagnostics(true)} />
         )}
@@ -797,7 +836,7 @@ function GenerationModePanel({ mode, segments, speakerVoiceMap, selectedNarrator
   </section>;
 }
 
-function StudioInspector({ renderStatus, onGenerate, selectedSegment, selectedVoice, selectedVoiceId, presets, takes, onUpdateSegment, onApplyPreset }: { renderStatus: RenderStatus; onGenerate: () => void; selectedSegment: ScriptSegment | null; selectedVoice: VoiceProfile | null; selectedVoiceId: string | null; presets: Record<string, StudioPreset> | null; takes: Take[]; onUpdateSegment: (patch: EditableSegmentPatch) => void; onApplyPreset: (emotion: string) => void }) {
+function StudioInspector({ renderStatus, onGenerate, selectedSegment, selectedVoice, selectedVoiceId, presets, takes, onSelectTake, onUpdateSegment, onApplyPreset }: { renderStatus: RenderStatus; onGenerate: () => void; selectedSegment: ScriptSegment | null; selectedVoice: VoiceProfile | null; selectedVoiceId: string | null; presets: Record<string, StudioPreset> | null; takes: Take[]; onSelectTake: (take: Take) => void; onUpdateSegment: (patch: EditableSegmentPatch) => void; onApplyPreset: (emotion: string) => void }) {
   const voiceLabel = selectedVoice
     ? `${selectedVoice.name} / ${selectedVoice.default_preset}`
     : selectedVoiceId
@@ -813,7 +852,7 @@ function StudioInspector({ renderStatus, onGenerate, selectedSegment, selectedVo
       <div className="inspector-section sliders"><div className="section-heading"><span>Performance</span><span className="unit-label">{selectedSegment?.inference_quality ?? "Balanced"}</span></div><NumericField disabled={!selectedSegment} label="Speed" value={selectedSegment?.speed ?? null} min={0.01} step={0.01} onChange={(speed) => onUpdateSegment({ speed: speed as number })} /><NumericField disabled={!selectedSegment} label="Duration" value={selectedSegment?.duration ?? null} min={0.01} step={0.1} nullable onChange={(duration) => onUpdateSegment({ duration })} /><NumericField disabled={!selectedSegment} label="Guidance" value={selectedSegment?.guidance ?? null} min={0} step={0.01} onChange={(guidance) => onUpdateSegment({ guidance: guidance as number })} /><NumericField disabled={!selectedSegment} label="Pause before" value={selectedSegment?.pause_before_ms ?? null} min={0} step={1} integer onChange={(pause_before_ms) => onUpdateSegment({ pause_before_ms: pause_before_ms as number })} /><NumericField disabled={!selectedSegment} label="Pause after" value={selectedSegment?.pause_after_ms ?? null} min={0} step={1} integer onChange={(pause_after_ms) => onUpdateSegment({ pause_after_ms: pause_after_ms as number })} /><NumericField disabled={!selectedSegment} label="Volume" value={selectedSegment?.volume ?? null} min={0} step={0.01} onChange={(volume) => onUpdateSegment({ volume: volume as number })} /></div>
       <div className="instruct-note"><span className="note-symbol">i</span><p>{selectedSegment?.warnings.length ? selectedSegment.warnings.join(" / ") : "Studio tags are best-effort direction. The reference voice still leads the performance."}</p></div>
       <button className={`inspector-generate ${renderStatus === "rendering" ? "busy" : ""}`} onClick={onGenerate} type="button"><span>{renderStatus === "rendering" ? "Rendering take..." : "Generate new take"}</span><span>-&gt;</span></button>
-      <div className="take-list"><div className="section-heading"><span>Recent takes</span><span className="unit-label">{segmentTakes.length}</span></div>{segmentTakes.length ? segmentTakes.map((take, index) => <div className="take-row" key={take.id}><span className="take-badge selected">{index + 1}</span><span><strong>Take {index + 1}</strong><small>{take.output_path}</small></span></div>) : <p>No takes for this line yet.</p>}</div>
+      <div className="take-list"><div className="section-heading"><span>Takes for this line</span><span className="unit-label">{segmentTakes.length}</span></div>{segmentTakes.length ? segmentTakes.map((take, index) => <button className="take-row" key={take.id} onClick={() => onSelectTake(take)} type="button"><span className={`take-badge ${selectedSegment?.selected_take === take.id ? "selected" : ""}`}>{index + 1}</span><span><strong>Take {index + 1}</strong><small>{take.output_path}</small></span></button>) : <p>No takes for this line yet.</p>}</div>
     </div>
   );
 }

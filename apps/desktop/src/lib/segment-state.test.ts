@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { ScriptSegment } from "./local-engine";
-import { applyStudioPresetToSegment, resolveSegmentVoiceId, updateSegmentById } from "./segment-state";
+import type { ScriptSegment, Take } from "./local-engine";
+import { applyStudioPresetToSegment, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./segment-state";
 
 function segment(id: string): ScriptSegment {
   return {
@@ -24,6 +24,10 @@ function segment(id: string): ScriptSegment {
     native_tags: [],
     warnings: [],
   };
+}
+
+function take(id: string, segmentId: string, outputPath: string): Take {
+  return { id, project_id: "episode-01", segment_id: segmentId, output_path: outputPath, request_snapshot: {}, created_at: "2026-08-09T00:00:00Z" };
 }
 
 describe("canonical Studio segment state", () => {
@@ -65,5 +69,18 @@ describe("canonical Studio segment state", () => {
     expect(resolveSegmentVoiceId(b, "dialogue", { A: "voice-adam", B: "voice-bella" }, null)).toBe("voice-bella");
     expect(resolveSegmentVoiceId(a, "single_narrator", {}, "voice-adam")).toBe("voice-adam");
     expect(resolveSegmentVoiceId({ ...a, voice_id: "voice-override" }, "dialogue", { A: "voice-adam" }, null)).toBe("voice-override");
+  });
+
+  it("resolves only the selected take belonging to the active segment", () => {
+    const takeA = take("take-a", "segment-1", "file-A.wav");
+    const takeB = take("take-b", "segment-1", "file-B.wav");
+    const segment2Take = take("take-2", "segment-2", "file-2.wav");
+    const takes = [takeA, takeB, segment2Take];
+    const segments = selectTakeForSegment([segment("segment-1"), segment("segment-2")], "segment-1", takeA.id);
+
+    expect(resolveSelectedTake(segments[0], takes)?.output_path).toBe("file-A.wav");
+    expect(resolveSelectedTake(selectTakeForSegment(segments, "segment-1", takeB.id)[0], takes)?.output_path).toBe("file-B.wav");
+    expect(resolveSelectedTake(segments[1], takes)).toBeNull();
+    expect(resolveSelectedTake({ ...segments[1], selected_take: takeA.id }, takes)).toBeNull();
   });
 });
