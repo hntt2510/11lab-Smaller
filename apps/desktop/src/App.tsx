@@ -479,6 +479,9 @@ function App() {
   const dialogueSpeakers = Array.from(new Set(
     scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
   ));
+  const generationBlockedByVoice = generationMode === "single_narrator"
+    ? !selectedNarratorVoiceId || !voiceProfiles.some((voice) => voice.id === selectedNarratorVoiceId)
+    : dialogueSpeakers.some((speaker) => !speakerVoiceMap[speaker] || !voiceProfiles.some((voice) => voice.id === speakerVoiceMap[speaker]));
   const selectVoice = (voiceId: string) => {
     setSelectedVoiceId(voiceId);
     setSelectedNarratorVoiceId(voiceId);
