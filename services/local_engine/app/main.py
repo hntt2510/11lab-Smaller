@@ -7,7 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .audio import encode_wav
@@ -31,6 +33,15 @@ from .services.reference_analyzer import analyze_reference
 from .services.script_director import parse_script
 
 logger = logging.getLogger(__name__)
+
+DESKTOP_ORIGINS = (
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+    "http://tauri.localhost",
+    "tauri://localhost",
+)
+REFERENCE_EXTENSIONS = {".wav", ".mp3"}
+MAX_REFERENCE_BYTES = 50 * 1024 * 1024
 
 
 class GenerateRequest(BaseModel):
@@ -154,6 +165,13 @@ def create_app(
     """Create an authenticated loopback API around a provider instance."""
 
     app = FastAPI(title="OmniVoice Local Engine", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(DESKTOP_ORIGINS),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
     app.state.provider = provider or OmniVoiceProvider()
     app.state.token = token or secrets.token_urlsafe(32)
     app.state.render_queue = render_queue
@@ -221,13 +239,21 @@ def create_app(
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+        wav_bytes = encode_wav(result.audio, result.sampling_rate)
+        headers = {
+            "X-Provider": result.provider,
+            "X-Sampling-Rate": str(result.sampling_rate),
+        }
+        workspace: Path | None = request.app.state.workspace
+        if workspace is not None:
+            output_path = workspace / f"generated-{secrets.token_hex(8)}.wav"
+            output_path.write_bytes(wav_bytes)
+            headers["X-Output-Path"] = str(output_path)
+
         return Response(
-            content=encode_wav(result.audio, result.sampling_rate),
+            content=wav_bytes,
             media_type="audio/wav",
-            headers={
-                "X-Provider": result.provider,
-                "X-Sampling-Rate": str(result.sampling_rate),
-            },
+            headers=headers,
         )
 
     @app.post("/script/parse", dependencies=[Depends(require_token)])
@@ -307,6 +333,47 @@ def create_app(
             metadata=metadata,
         )
         return store.save_voice(profile).to_dict()
+
+    @app.post("/voices/upload", dependencies=[Depends(require_token)])
+    async def upload_voice(
+        request: Request,
+        file: UploadFile = File(...),
+        name: str = Form(...),
+        reference_transcript: str = Form(""),
+        reference_language: str | None = Form(default=None),
+        default_preset: str = Form("Balanced"),
+        consent_type: str = Form("owned_voice"),
+        consent_confirmed: bool = Form(False),
+    ) -> dict[str, Any]:
+        store: ProjectStore | None = request.app.state.project_store
+        workspace: Path | None = request.app.state.workspace
+        if store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="Project store is disabled")
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in REFERENCE_EXTENSIONS:
+            raise HTTPException(status_code=422, detail="Only WAV and MP3 reference files are supported")
+        content = await file.read(MAX_REFERENCE_BYTES + 1)
+        if len(content) > MAX_REFERENCE_BYTES:
+            raise HTTPException(status_code=413, detail="Reference audio must be 50 MB or smaller")
+
+        reference_dir = workspace / "references"
+        reference_dir.mkdir(parents=True, exist_ok=True)
+        reference_path = reference_dir / f"{secrets.token_urlsafe(12)}{suffix}"
+        reference_path.write_bytes(content)
+        try:
+            payload = VoiceCreateRequest(
+                name=name,
+                reference_audio=str(reference_path),
+                reference_transcript=reference_transcript or None,
+                reference_language=reference_language,
+                default_preset=default_preset,
+                consent_type=consent_type,
+                consent_confirmed=consent_confirmed,
+            )
+            return create_voice(payload, request)
+        except (HTTPException, ValueError):
+            reference_path.unlink(missing_ok=True)
+            raise
 
     @app.get("/voices/{voice_id}", dependencies=[Depends(require_token)])
     def get_voice(voice_id: str, request: Request) -> dict[str, Any]:
@@ -391,6 +458,24 @@ def create_app(
     def audio_presets() -> dict[str, list[str]]:
         return {"presets": list(MASTERING_PRESETS)}
 
+    @app.get("/audio/file", dependencies=[Depends(require_token)])
+    def audio_file(path: str, request: Request) -> FileResponse:
+        workspace: Path | None = request.app.state.workspace
+        if workspace is None:
+            raise HTTPException(status_code=503, detail="Workspace is disabled")
+        candidate = Path(path).expanduser().resolve()
+        if candidate == workspace or not candidate.is_relative_to(workspace):
+            raise HTTPException(status_code=422, detail="audio path must stay inside the workspace")
+        if candidate.suffix.lower() not in {".wav", ".mp3", ".srt"}:
+            raise HTTPException(status_code=422, detail="only WAV, MP3 and SRT files can be served")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="audio file not found")
+        media_type = {
+            ".mp3": "audio/mpeg",
+            ".srt": "application/x-subrip",
+        }.get(candidate.suffix.lower(), "audio/wav")
+        return FileResponse(candidate, media_type=media_type, filename=candidate.name)
+
     @app.post("/audio/process", dependencies=[Depends(require_token)])
     def process_audio_route(
         payload: AudioProcessRequest,
@@ -465,6 +550,7 @@ def create_app(
         try:
             output_name = payload.output_filename or f"subtitles-{secrets.token_hex(8)}.srt"
             output_path = _resolve_workspace_path(workspace, output_name, ".srt")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(export_srt(payload.segments), encoding="utf-8")
             return {"output_path": str(output_path)}
         except ValueError as exc:

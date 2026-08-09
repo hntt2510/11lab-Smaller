@@ -71,6 +71,42 @@ export type ReferenceAnalysis = {
   language_match?: boolean | null;
 };
 
+export type AudioEditOptions = {
+  source_path: string;
+  output_filename?: string;
+  output_format?: "wav" | "mp3";
+  trim_start?: number;
+  trim_end?: number | null;
+  fade_in?: number;
+  fade_out?: number;
+  volume?: number;
+  silence_before?: number;
+  silence_after?: number;
+  preset?: string;
+};
+
+export type AudioProcessResult = {
+  output_path: string;
+  preset: string;
+  metrics: Record<string, number>;
+  warnings: string[];
+};
+
+export type AudioQualityResult = {
+  metrics: Record<string, number>;
+  passed: boolean;
+  warnings: string[];
+};
+
+export type SrtExportResult = {
+  output_path: string;
+};
+
+export type GeneratedAudio = {
+  blob: Blob;
+  outputPath: string | null;
+};
+
 type EngineBootstrap = {
   baseUrl: string;
   token: string;
@@ -135,6 +171,41 @@ export class LocalEngineClient {
     return this.request<VoiceProfile[]>("/voices");
   }
 
+  async uploadVoice(file: File, payload: {
+    name: string;
+    reference_transcript?: string;
+    reference_language?: string;
+    default_preset?: string;
+    consent_type?: string;
+    consent_confirmed: boolean;
+  }): Promise<VoiceProfile> {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("name", payload.name);
+    form.append("reference_transcript", payload.reference_transcript ?? "");
+    form.append("reference_language", payload.reference_language ?? "");
+    form.append("default_preset", payload.default_preset ?? "Balanced");
+    form.append("consent_type", payload.consent_type ?? "owned_voice");
+    form.append("consent_confirmed", String(payload.consent_confirmed));
+
+    const response = await fetch(`${this.baseUrl}/voices/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: form,
+    });
+    if (!response.ok) {
+      let detail = `Voice upload failed (${response.status})`;
+      try {
+        const error = await response.json() as { detail?: string };
+        if (error.detail) detail = error.detail;
+      } catch {
+        // Keep the status-based error when the server response is not JSON.
+      }
+      throw new Error(detail);
+    }
+    return response.json() as Promise<VoiceProfile>;
+  }
+
   saveProject(projectId: string, payload: {
     name: string;
     source: string;
@@ -147,20 +218,57 @@ export class LocalEngineClient {
     });
   }
 
-  generate(payload: GeneratePayload): Promise<Blob> {
-    return fetch(`${this.baseUrl}/generate`, {
+  async generate(payload: GeneratePayload): Promise<GeneratedAudio> {
+    const response = await fetch(`${this.baseUrl}/generate`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-    }).then((response) => {
-      if (!response.ok) {
-        throw new Error(`Generation failed (${response.status})`);
-      }
-      return response.blob();
     });
+    if (!response.ok) {
+      throw new Error(`Generation failed (${response.status})`);
+    }
+    return {
+      blob: await response.blob(),
+      outputPath: response.headers.get("X-Output-Path"),
+    };
+  }
+
+  processAudio(payload: AudioEditOptions): Promise<AudioProcessResult> {
+    return this.request<AudioProcessResult>("/audio/process", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  qualityCheck(path: string, expectedDuration?: number): Promise<AudioQualityResult> {
+    return this.request<AudioQualityResult>("/audio/quality", {
+      method: "POST",
+      body: JSON.stringify({ path, expected_duration: expectedDuration }),
+    });
+  }
+
+  exportSrt(segments: ScriptSegment[], outputFilename?: string): Promise<SrtExportResult> {
+    return this.request<SrtExportResult>("/audio/export/srt", {
+      method: "POST",
+      body: JSON.stringify({ segments, output_filename: outputFilename }),
+    });
+  }
+
+  async fetchFile(path: string): Promise<Blob> {
+    const response = await fetch(`${this.baseUrl}/audio/file?path=${encodeURIComponent(path)}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!response.ok) {
+      throw new Error(`Audio download failed (${response.status})`);
+    }
+    return response.blob();
+  }
+
+  fetchAudio(path: string): Promise<Blob> {
+    return this.fetchFile(path);
   }
 }
 

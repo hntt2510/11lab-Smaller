@@ -14,7 +14,8 @@
     "@tauri-apps/api": "^2.5.0",
     "gsap": "^3.13.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "wavesurfer.js": "^7.12.11"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.5.0",

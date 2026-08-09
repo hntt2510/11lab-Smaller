@@ -75,6 +75,24 @@ class ProviderContractTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "fake")
 
+    def test_api_allows_desktop_cors_preflight(self):
+        client = TestClient(create_app(FakeProvider(), token="secret"))
+
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "http://127.0.0.1:1420",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "http://127.0.0.1:1420",
+        )
+
     def test_request_returns_wav_and_queue_persists_output(self):
         with TemporaryDirectory() as workspace:
             provider = FakeProvider()

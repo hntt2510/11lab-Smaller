@@ -86,9 +86,11 @@ def process_audio(
         raise ValueError("volume must be greater than zero")
 
     audio, sample_rate = load_audio(source_path)
+    if audio.shape[0] == 0:
+        raise ValueError("source audio is empty")
     start = int(round(trim_start * sample_rate))
     end = audio.shape[0] if trim_end is None else int(round(trim_end * sample_rate))
-    if start >= audio.shape[0] or end > audio.shape[0]:
+    if start >= audio.shape[0] or end > audio.shape[0] or end <= start:
         raise ValueError("trim range exceeds source duration")
     audio = audio[start:end].copy()
     audio *= float(volume)

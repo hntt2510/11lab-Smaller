@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import io
+import shutil
+import subprocess
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,17 +136,48 @@ def _load_audio(path: Path) -> tuple[np.ndarray, int, int]:
         audio, sample_rate = sf.read(str(path), always_2d=True, dtype="float32")
         return np.asarray(audio), int(sample_rate), int(audio.shape[1])
     except ImportError:
+        if path.suffix.lower() == ".mp3":
+            return _load_mp3_with_ffmpeg(path)
         return _load_pcm_wav(path)
     except RuntimeError as exc:
+        if reference_path.suffix.lower() == ".mp3":
+            return _load_mp3_with_ffmpeg(reference_path)
         raise ValueError(f"unable to decode reference audio: {exc}") from exc
 
 
+def _load_mp3_with_ffmpeg(path: Path) -> tuple[np.ndarray, int, int]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ValueError("MP3 analysis requires FFmpeg")
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-f", "wav", "-acodec", "pcm_s16le", "pipe:1"],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ValueError("unable to decode MP3 reference audio") from exc
+    return _load_pcm_wav_bytes(completed.stdout)
+
+
 def _load_pcm_wav(path: Path) -> tuple[np.ndarray, int, int]:
-    with wave.open(str(path), "rb") as wav:
-        channels = wav.getnchannels()
-        sample_rate = wav.getframerate()
-        sample_width = wav.getsampwidth()
-        frames = wav.readframes(wav.getnframes())
+    try:
+        with wave.open(str(path), "rb") as wav:
+            return _read_pcm_wav(wav)
+    except (EOFError, wave.Error) as exc:
+        raise ValueError(f"unable to decode WAV reference audio: {path}") from exc
+
+
+def _load_pcm_wav_bytes(data: bytes) -> tuple[np.ndarray, int, int]:
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        return _read_pcm_wav(wav)
+
+
+def _read_pcm_wav(wav: wave.Wave_read) -> tuple[np.ndarray, int, int]:
+    channels = wav.getnchannels()
+    sample_rate = wav.getframerate()
+    sample_width = wav.getsampwidth()
+    frames = wav.readframes(wav.getnframes())
     if sample_width != 2:
         raise ValueError("fallback WAV analyzer only supports 16-bit PCM")
     values = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0

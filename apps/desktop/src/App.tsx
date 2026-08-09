@@ -4,10 +4,13 @@ import gsap from "gsap";
 
 import {
   EngineHealth,
+  ReferenceAnalysis,
   ScriptSegment,
   VoiceProfile,
   getLocalEngineClient,
 } from "./lib/local-engine";
+import type { AudioEditOptions } from "./lib/local-engine";
+import { WaveformEditor } from "./components/WaveformEditor";
 
 gsap.registerPlugin(useGSAP);
 
@@ -26,6 +29,15 @@ type NavItem = {
   label: string;
   short: string;
   count?: string;
+};
+
+type VoiceCard = {
+  id: string;
+  name: string;
+  detail: string;
+  score: number;
+  tone: string;
+  tag: string;
 };
 
 const navItems: NavItem[] = [
@@ -59,19 +71,22 @@ const scripts = [
 
 const scriptSource = "[calm] Tonight, the signal arrives from a place no map can name.\n[pause=500]\n[curious] At first, it sounds like static. Then it starts answering back.\n[excited speed=1.08] This is where the quiet side of the story changes everything.";
 
-const demoVoices = [
+const demoVoices: VoiceCard[] = [
   { id: "atlas", name: "Atlas", detail: "warm low / English", score: 92, tone: "orange", tag: "NATURAL" },
   { id: "mira", name: "Mira", detail: "clear bright / Vietnamese", score: 86, tone: "blue", tag: "LOCAL ONLY" },
   { id: "north", name: "North", detail: "measured / English", score: 78, tone: "green", tag: "REFERENCE" },
 ];
 
-const waveform = [
-  18, 29, 14, 44, 26, 52, 39, 20, 66, 34, 23, 58, 73, 45, 31, 62, 24, 51,
-  36, 70, 42, 27, 57, 31, 76, 49, 34, 61, 25, 45, 67, 33, 22, 58, 39, 72,
-  44, 25, 62, 35, 55, 28, 70, 42, 31, 63, 22, 48, 35, 59, 26, 71, 38, 23,
-  54, 32, 67, 43, 27, 58, 36, 74, 45, 29, 61, 33, 52, 24, 68, 40, 30, 56,
-  21, 49, 35, 65, 42, 27, 57, 32, 70, 44, 26, 53, 38, 62, 24, 47,
-];
+function voiceToCard(profile: VoiceProfile): VoiceCard {
+  return {
+    id: profile.id,
+    name: profile.name,
+    detail: `${profile.default_preset} / ${profile.reference_language ?? "language agnostic"}`,
+    score: Number((profile.metadata.reference_analysis as { score?: number } | undefined)?.score ?? 0),
+    tone: profile.favorite ? "orange" : "blue",
+    tag: profile.cloud_sync_status === "local" ? "LOCAL ONLY" : "SYNCED",
+  };
+}
 
 const viewMeta: Record<ViewKey, { eyebrow: string; title: string; detail: string }> = {
   home: {
@@ -101,6 +116,15 @@ const viewMeta: Record<ViewKey, { eyebrow: string; title: string; detail: string
   },
 };
 
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const [activeView, setActiveView] = useState<ViewKey>("studio");
@@ -108,10 +132,10 @@ function App() {
   const [scriptLines, setScriptLines] = useState<ScriptLine[]>(scripts);
   const [sourceDraft, setSourceDraft] = useState(scriptSource);
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("ready");
-  const [isPlaying, setIsPlaying] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioPath, setAudioPath] = useState<string | null>(null);
   const [engineHealth, setEngineHealth] = useState<EngineHealth>({
     status: "offline",
     provider: "omnivoice",
@@ -244,17 +268,93 @@ function App() {
     const client = getLocalEngineClient();
     if (client) {
       try {
-        const audio = await client.generate({
+        const generated = await client.generate({
           text: scriptLines.find((script) => script.id === selectedScript)?.text ?? scriptLines[0].text,
           options: { num_step: 32, postprocess_output: true },
         });
-        setAudioUrl(URL.createObjectURL(audio));
+        setAudioPath(generated.outputPath);
+        setAudioUrl(URL.createObjectURL(generated.blob));
         setRenderStatus("complete");
         setToast("WAV returned by the local engine");
       } catch {
         setRenderStatus("ready");
         setToast("Local engine is unavailable; showing preview state");
       }
+    }
+  });
+
+  const processAudioEdit = contextSafe(async (options: Omit<AudioEditOptions, "source_path">) => {
+    const client = getLocalEngineClient();
+    if (!client || !audioPath) {
+      setToast("Generate a local take before applying waveform edits");
+      return;
+    }
+    try {
+      const result = await client.processAudio({ ...options, source_path: audioPath, output_format: "wav" });
+      const blob = await client.fetchAudio(result.output_path);
+      setAudioPath(result.output_path);
+      setAudioUrl(URL.createObjectURL(blob));
+      setToast(result.warnings.length ? result.warnings[0] : "Waveform edit applied");
+    } catch {
+      setToast("Audio edit failed; keeping the current take");
+    }
+  });
+
+  const runQualityCheck = contextSafe(async () => {
+    const client = getLocalEngineClient();
+    if (!client || !audioPath) {
+      setToast("Generate a local take before running quality check");
+      return;
+    }
+    try {
+      const result = await client.qualityCheck(audioPath);
+      setToast(result.passed ? "Quality check passed" : result.warnings.join(" / "));
+    } catch {
+      setToast("Quality checker is unavailable");
+    }
+  });
+
+  const exportMp3 = contextSafe(async () => {
+    const client = getLocalEngineClient();
+    if (!client || !audioPath) {
+      setToast("Generate a local take before exporting MP3");
+      return;
+    }
+    try {
+      const result = await client.processAudio({ source_path: audioPath, output_format: "mp3", preset: "Raw" });
+      downloadBlob(await client.fetchAudio(result.output_path), "episode-01.mp3");
+      setToast("MP3 export downloaded");
+    } catch {
+      setToast("MP3 export failed; check that FFmpeg is installed");
+    }
+  });
+
+  const exportWav = contextSafe(async () => {
+    const client = getLocalEngineClient();
+    if (!client || !audioPath) {
+      setToast("Generate a local take before exporting WAV");
+      return;
+    }
+    try {
+      downloadBlob(await client.fetchAudio(audioPath), "episode-01.wav");
+      setToast("WAV export downloaded");
+    } catch {
+      setToast("WAV export failed");
+    }
+  });
+
+  const exportSrt = contextSafe(async () => {
+    const client = getLocalEngineClient();
+    if (!client) {
+      setToast("Connect the local engine to export subtitles");
+      return;
+    }
+    try {
+      const result = await client.exportSrt(scriptLines.map(lineToSegment), "episode-01.srt");
+      downloadBlob(await client.fetchFile(result.output_path), "episode-01.srt");
+      setToast("SRT export downloaded");
+    } catch {
+      setToast("SRT export failed");
     }
   });
 
@@ -347,13 +447,17 @@ function App() {
 
           {activeView === "studio" ? (
             <StudioView
-              isPlaying={isPlaying}
-              onPlay={() => setIsPlaying((playing) => !playing)}
               onSelect={setSelectedScript}
               selectedScript={selectedScript}
               renderStatus={renderStatus}
               onGenerate={generateTake}
               audioUrl={audioUrl}
+              onProcessEdit={processAudioEdit}
+              onQualityCheck={runQualityCheck}
+              onExportWav={exportWav}
+              onExportMp3={exportMp3}
+              onExportSrt={exportSrt}
+              onReplaceTake={generateTake}
               scripts={scriptLines}
               sourceDraft={sourceDraft}
               onSourceChange={setSourceDraft}
@@ -410,25 +514,33 @@ function lineToSegment(line: ScriptLine): ScriptSegment {
 }
 
 function StudioView({
-  isPlaying,
-  onPlay,
   onSelect,
   selectedScript,
   renderStatus,
   onGenerate,
   audioUrl,
+  onProcessEdit,
+  onQualityCheck,
+  onExportWav,
+  onExportMp3,
+  onExportSrt,
+  onReplaceTake,
   scripts,
   sourceDraft,
   onSourceChange,
   onParse,
 }: {
-  isPlaying: boolean;
-  onPlay: () => void;
   onSelect: (id: string) => void;
   selectedScript: string;
   renderStatus: RenderStatus;
   onGenerate: () => void;
   audioUrl: string | null;
+  onProcessEdit: (options: Omit<AudioEditOptions, "source_path">) => void;
+  onQualityCheck: () => void;
+  onExportWav: () => void;
+  onExportMp3: () => void;
+  onExportSrt: () => void;
+  onReplaceTake: () => void;
   scripts: ScriptLine[];
   sourceDraft: string;
   onSourceChange: (source: string) => void;
@@ -473,18 +585,20 @@ function StudioView({
           <div><span className="tiny-label">TIMELINE</span><strong>Take B / Natural</strong></div>
           <span className={`render-state ${renderStatus}`}><i />{renderStatus === "rendering" ? "Rendering" : renderStatus === "complete" ? "Ready to review" : "Draft"}</span>
         </div>
-          <div className="waveform-wrap">
-          <button className="play-button" onClick={onPlay} type="button" aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? "||" : ">"}</button>
-          <div className={`waveform ${isPlaying ? "playing" : ""}`} aria-label="Audio waveform">
-            {waveform.map((height, index) => <span key={`${height}-${index}`} style={{ height: `${height}%` }} />)}
-          </div>
-          {audioUrl && <audio className="native-audio" controls src={audioUrl} />}
-          <span className="wave-time">00:06.4 / 00:07.4</span>
-        </div>
+        <WaveformEditor
+          audioUrl={audioUrl}
+          onProcess={onProcessEdit}
+          onQualityCheck={onQualityCheck}
+          onExportWav={onExportWav}
+          onExportMp3={onExportMp3}
+          onReplaceTake={onReplaceTake}
+        />
         <div className="transport-bottom">
-          <div className="transport-controls"><button type="button">|&lt;</button><button type="button">-10</button><button type="button">+10</button><button type="button">&gt;|</button></div>
           <div className="take-strip"><span className="active-take">A</span><span>B</span><span>C</span><span className="take-label">3 takes</span></div>
-          <button className="export-button" type="button" onClick={onGenerate}>Render WAV <span>-&gt;</span></button>
+          <div className="transport-export-actions">
+            <button className="export-button" type="button" onClick={onGenerate}>Render WAV <span>-&gt;</span></button>
+            <button className="export-button" type="button" onClick={onExportSrt}>Export SRT <span>-&gt;</span></button>
+          </div>
         </div>
         <div className="render-meter" />
       </section>
@@ -533,16 +647,7 @@ function VoiceLibraryView({ onOpenStudio }: { onOpenStudio: () => void }) {
     if (!client) return;
     client.listVoices().then((profiles: VoiceProfile[]) => {
       if (profiles.length === 0) return;
-      setVoices(
-        profiles.map((profile) => ({
-          id: profile.id,
-          name: profile.name,
-          detail: `${profile.default_preset} / ${profile.reference_language ?? "language agnostic"}`,
-          score: Number((profile.metadata.reference_analysis as { score?: number } | undefined)?.score ?? 0),
-          tone: profile.favorite ? "orange" : "blue",
-          tag: profile.cloud_sync_status === "local" ? "LOCAL ONLY" : "SYNCED",
-        })),
-      );
+      setVoices(profiles.map(voiceToCard));
     }).catch(() => undefined);
   }, []);
 
@@ -562,7 +667,15 @@ function VoiceLibraryView({ onOpenStudio }: { onOpenStudio: () => void }) {
         <div className="quality-checks"><QualityCheck label="Length" value="07.4 sec" state="good" /><QualityCheck label="Silence ratio" value="12%" state="good" /><QualityCheck label="Clipping" value="0.02%" state="warn" /><QualityCheck label="ASR confidence" value="Not scanned" state="muted" /></div>
         <button className="outline-button analyzer-button" type="button" onClick={() => setShowAnalyzer(true)}>Run full analyzer -&gt;</button>
       </section>
-      {showAnalyzer && <ReferenceAnalyzerPanel onClose={() => setShowAnalyzer(false)} />}
+      {showAnalyzer && (
+        <ReferenceAnalyzerPanel
+          onClose={() => setShowAnalyzer(false)}
+          onCreated={(profile) => {
+            setVoices((current) => [voiceToCard(profile), ...current.filter((voice) => voice.id !== profile.id)]);
+            setSelectedVoice(profile.id);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -571,8 +684,115 @@ function QualityCheck({ label, value, state }: { label: string; value: string; s
   return <div className="quality-check"><span className={`quality-mark ${state}`}>{state === "good" ? "OK" : state === "warn" ? "!" : "--"}</span><span>{label}</span><b>{value}</b></div>;
 }
 
-function ReferenceAnalyzerPanel({ onClose }: { onClose: () => void }) {
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="reference-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-top"><div><span className="eyebrow-line" /><span className="tiny-label">REFERENCE ANALYZER</span><h2>Make the source voice easier to trust.</h2></div><button className="icon-button" onClick={onClose} type="button">x</button></div><div className="drop-zone"><span className="drop-icon">+</span><strong>Drop a WAV reference here</strong><small>Recommended / 3 to 10 seconds / mono or stereo</small><button className="outline-button" type="button">Choose audio</button></div><div className="analyzer-foot"><span>Consent is required before saving a cloned voice.</span><button className="primary-button" onClick={onClose} type="button">Done</button></div></section></div>;
+function ReferenceAnalyzerPanel({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (profile: VoiceProfile) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [name, setName] = useState("");
+  const [transcript, setTranscript] = useState("");
+  const [language, setLanguage] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<ReferenceAnalysis | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const selectFile = (nextFile: File | undefined) => {
+    if (!nextFile) return;
+    const extension = nextFile.name.toLowerCase().slice(nextFile.name.lastIndexOf("."));
+    if (extension !== ".wav" && extension !== ".mp3") {
+      setError("Chỉ hỗ trợ file .wav hoặc .mp3");
+      return;
+    }
+    setError(null);
+    setFile(nextFile);
+    setName((current) => current || nextFile.name.replace(/\.[^/.]+$/, ""));
+  };
+
+  const saveVoice = async () => {
+    const client = getLocalEngineClient();
+    if (!client) {
+      setError("Local engine chưa kết nối");
+      return;
+    }
+    if (!file || !name.trim()) {
+      setError("Hãy chọn file và đặt tên voice");
+      return;
+    }
+    if (!consent) {
+      setError("Bạn phải xác nhận quyền sử dụng giọng nói");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const profile = await client.uploadVoice(file, {
+        name: name.trim(),
+        reference_transcript: transcript.trim(),
+        reference_language: language.trim() || undefined,
+        consent_type: "owned_voice",
+        consent_confirmed: true,
+      });
+      const referenceAnalysis = profile.metadata.reference_analysis as ReferenceAnalysis | undefined;
+      setAnalysis(referenceAnalysis ?? null);
+      onCreated(profile);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể lưu voice");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="reference-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-top">
+          <div><span className="eyebrow-line" /><span className="tiny-label">REFERENCE ANALYZER</span><h2>Add a voice you have permission to use.</h2></div>
+          <button className="icon-button" onClick={onClose} type="button">x</button>
+        </div>
+        <div className="voice-form">
+          <label className="voice-field">Voice name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Narrator" /></label>
+          <label className="voice-field">Language<input value={language} onChange={(event) => setLanguage(event.target.value)} placeholder="e.g. vi or en" /></label>
+        </div>
+        <input ref={inputRef} className="hidden-file-input" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" onChange={(event) => selectFile(event.target.files?.[0])} />
+        <div
+          className={`drop-zone ${file ? "has-file" : ""}`}
+          onClick={() => inputRef.current?.click()}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => { event.preventDefault(); selectFile(event.dataTransfer.files[0]); }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") inputRef.current?.click(); }}
+        >
+          <span className="drop-icon">+</span>
+          <strong>{file ? file.name : "Drop a WAV or MP3 reference here"}</strong>
+          <small>Recommended / 3 to 10 seconds / mono or stereo / max 50 MB</small>
+          <button className="outline-button" onClick={(event) => { event.stopPropagation(); inputRef.current?.click(); }} type="button">Choose audio</button>
+          {previewUrl && <audio className="reference-preview" controls src={previewUrl} />}
+        </div>
+        <label className="voice-field transcript-field">Reference transcript<textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} placeholder="Optional, but improves voice matching" /></label>
+        <label className="consent-row"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /> I own this voice or have permission to use it.</label>
+        {analysis && <div className="upload-analysis"><strong>Reference score: {analysis.score}/100</strong><span>{analysis.warnings.length ? analysis.warnings.join(" / ") : "Reference is ready to use"}</span></div>}
+        {error && <div className="form-error">{error}</div>}
+        <div className="analyzer-foot"><span>Voice references stay local by default.</span><div><button className="outline-button" onClick={onClose} type="button">Cancel</button><button className="primary-button" disabled={saving} onClick={saveVoice} type="button">{saving ? "Analyzing..." : "Save voice"}</button></div></div>
+      </section>
+    </div>
+  );
 }
 
 function DiagnosticsMini({ onOpen }: { onOpen: () => void }) {
