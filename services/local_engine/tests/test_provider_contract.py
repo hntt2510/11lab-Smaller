@@ -169,7 +169,7 @@ class ProviderContractTest(unittest.TestCase):
         self.assertEqual(len(segments), 3)
         self.assertEqual(segments[0].emotion, "calm")
         self.assertEqual(segments[0].speed, 0.92)
-        self.assertEqual(segments[1].pause_before_ms, 500)
+        self.assertEqual(segments[0].pause_after_ms, 500)
         self.assertEqual(segments[1].take_count, 2)
         self.assertEqual(segments[1].speed, 1.08)
         self.assertEqual(segments[2].native_tags, ("laughter",))
@@ -194,13 +194,14 @@ class ProviderContractTest(unittest.TestCase):
             "[pause=500]\n[excited speed=1.08] Hello [laughter] world.",
         )
 
-        self.assertEqual(len(segments), 1)
-        self.assertEqual(segments[0].text, "Hello [laughter] world.")
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].text, "Hello")
         self.assertEqual(segments[0].emotion, "excited")
         self.assertIsNone(segments[0].instruct)
         self.assertEqual(segments[0].speed, 1.08)
         self.assertEqual(segments[0].pause_before_ms, 500)
-        self.assertEqual(segments[0].native_tags, ("laughter",))
+        self.assertEqual(segments[1].native_tags, ("laughter",))
+        self.assertEqual(segments[1].text, "[laughter] world.")
 
     def test_studio_presets_keep_emotion_without_unsupported_instruct(self):
         expected = {
@@ -257,7 +258,46 @@ class ProviderContractTest(unittest.TestCase):
         self.assertIn("[laughter]", segments[3].text)
         self.assertIn("À... ừm...", segments[4].text)
         self.assertIn("[terrified]", segments[4].text)
-        self.assertTrue(any("Unknown studio tags" in warning for warning in segments[4].warnings))
+        self.assertTrue(any("Unknown studio tag" in warning for warning in segments[4].warnings))
+
+    def test_inline_direction_tags_create_isolated_single_narrator_spans(self):
+        segments = parse_script("[calm] A. [excited] B! [whisper] C... [fast] D!")
+
+        self.assertEqual(len(segments), 4)
+        self.assertEqual([segment.text for segment in segments], ["A.", "B!", "C...", "D!"])
+        self.assertEqual([segment.direction for segment in segments], ["calm", "excited", "whisper", "fast"])
+        self.assertEqual([segment.provider_instruct for segment in segments], [None, None, "whisper", None])
+        self.assertEqual([segment.speed for segment in segments], [0.92, 1.08, 1.0, 1.12])
+        self.assertEqual([segment.pause_after_ms for segment in segments[:-1]], [0, 0, 0])
+
+    def test_inline_spans_keep_fillers_speaker_identity_and_native_reactions(self):
+        segments = parse_script(
+            "A: [calm] À... ừm, bình tĩnh. [whisper] Ê... nghe tôi nói.\n"
+            "B: [excited] Ủa! [laughter] Hahaha... [calm] Được rồi.",
+            dialogue=True,
+        )
+
+        self.assertEqual([segment.speaker for segment in segments], ["A", "A", "B", "B", "B"])
+        self.assertEqual([segment.direction for segment in segments], ["calm", "whisper", "excited", "laughter", "calm"])
+        self.assertIn("À... ừm", segments[0].text)
+        self.assertIn("[laughter]", segments[3].text)
+        self.assertEqual(segments[3].native_tags, ("laughter",))
+
+    def test_multiple_sentences_share_one_direction_until_the_next_tag(self):
+        segments = parse_script("[calm] First sentence. Second sentence. Third sentence. [excited] Wow!")
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].text, "First sentence. Second sentence. Third sentence.")
+        self.assertEqual(segments[0].direction, "calm")
+        self.assertEqual(segments[1].direction, "excited")
+
+    def test_plain_text_before_the_first_direction_becomes_a_neutral_span(self):
+        segments = parse_script("À... tôi cũng không chắc. [excited] Ủa! Gì vậy?")
+
+        self.assertEqual(len(segments), 2)
+        self.assertIsNone(segments[0].direction)
+        self.assertEqual(segments[0].text, "À... tôi cũng không chắc.")
+        self.assertEqual(segments[1].direction, "excited")
 
     def test_direction_engine_supports_all_studio_fallbacks_without_provider_instruct(self):
         for direction in ("calm", "excited", "sad", "serious", "happy", "angry", "nervous", "curious", "slow", "fast", "emphasis"):

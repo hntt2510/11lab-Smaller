@@ -79,163 +79,135 @@ def parse_script(
     dialogue: bool = False,
     provider_name: str = "omnivoice",
 ) -> list[ScriptSegment]:
-    """Parse one segment per non-empty line, preserving native model tags."""
+    """Parse continuous text into independent direction spans.
+
+    New direction and native reaction tags are semantic boundaries.  Direction
+    fallback pauses are kept only at a source/chunk end; internal boundaries
+    use no invented pause so Goal 06 assembles continuous narration naturally.
+    """
 
     if not source.strip():
         return []
 
+    chunks: list[tuple[str | None, str]] = []
+    if dialogue:
+        for raw_line in source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = _SPEAKER_PREFIX_PATTERN.match(line)
+            chunks.append((match.group("speaker").strip() if match else None, match.group("text").strip() if match else line))
+    else:
+        continuous = " ".join(line.strip() for line in source.splitlines() if line.strip())
+        if continuous:
+            chunks.append((None, continuous))
+
     segments: list[ScriptSegment] = []
     pending_pause_before = 0
-    for raw_line in source.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
 
-        speaker: str | None = None
-        if dialogue:
-            speaker_match = _SPEAKER_PREFIX_PATTERN.match(line)
-            if speaker_match is not None:
-                speaker = speaker_match.group("speaker").strip()
-                line = speaker_match.group("text").strip()
+    def new_state(direction: str | None = None, native_tag: str | None = None) -> dict[str, Any]:
+        execution = resolve_direction(direction, provider_name)
+        return {
+            "text": "",
+            "emotion": native_tag or direction,
+            "direction": native_tag or direction,
+            "instruct": execution.provider_instruct,
+            "provider_instruct": execution.provider_instruct,
+            "speed": execution.speed,
+            "duration": None,
+            "volume": execution.volume,
+            "take_count": execution.take_count,
+            "fallback_pause_after": execution.pause_after_ms,
+            "explicit_pause_after": 0,
+            "pause_before": 0,
+            "voice_id": default_voice_id,
+            "native_tags": [native_tag] if native_tag else [],
+            "warnings": [],
+        }
 
-        emotion: str | None = None
-        direction: str | None = None
-        instruct: str | None = None
-        provider_instruct: str | None = None
-        speed = 1.0
-        duration: float | None = None
-        volume = 1.0
-        take_count = 1
-        pause_before = 0
-        pause_after = 0
-        voice_id = default_voice_id
-        native_tags: list[str] = []
-        warnings: list[str] = []
-        unknown_tags: list[str] = []
+    for speaker, content in chunks:
+        current = new_state()
 
-        def replace_tag(match: re.Match[str]) -> str:
-            nonlocal emotion, direction, instruct, provider_instruct, speed, duration, volume, take_count
-            nonlocal pause_before, pause_after, voice_id
+        def emit(*, internal_boundary: bool) -> None:
+            nonlocal current, pending_pause_before
+            text = current["text"].strip()
+            if not text:
+                return
+            warnings = list(current["warnings"])
+            if dialogue and speaker is None:
+                warnings.append("Dialogue line has no speaker prefix and requires a voice assignment.")
+            if current["direction"]:
+                warnings.append("Studio direction is best-effort; the reference voice remains dominant.")
+            segments.append(ScriptSegment(
+                id=f"segment-{len(segments) + 1:02d}", text=text, speaker=speaker,
+                voice_id=current["voice_id"], emotion=current["emotion"], direction=current["direction"],
+                instruct=current["instruct"], provider_instruct=current["provider_instruct"], speed=current["speed"],
+                duration=current["duration"], pause_before_ms=pending_pause_before + current["pause_before"],
+                pause_after_ms=current["explicit_pause_after"] if internal_boundary else max(current["fallback_pause_after"], current["explicit_pause_after"]),
+                volume=current["volume"], inference_quality="Balanced", guidance=2.0,
+                take_count=current["take_count"], native_tags=tuple(current["native_tags"]), warnings=tuple(warnings),
+            ))
+            pending_pause_before = 0
 
+        def apply_options(options: list[str]) -> None:
+            for option in options:
+                speed_match = _SPEED_PATTERN.match(option)
+                pause_match = _PAUSE_PATTERN.match(option)
+                duration_match = _DURATION_PATTERN.match(option)
+                voice_match = _VOICE_PATTERN.match(option)
+                if speed_match:
+                    current["speed"] = float(speed_match.group(1))
+                elif pause_match:
+                    current["explicit_pause_after"] = max(current["explicit_pause_after"], int(pause_match.group(1)))
+                elif duration_match:
+                    current["duration"] = float(duration_match.group(1))
+                elif voice_match:
+                    current["voice_id"] = voice_match.group(1)
+                else:
+                    current["warnings"].append(f"Unknown studio tag kept in text: {option}")
+
+        cursor = 0
+        for match in _TAG_PATTERN.finditer(content):
+            current["text"] += content[cursor:match.start()]
             raw_tag = match.group(1).strip()
             normalized = raw_tag.lower()
-            before_text = bool(line[: match.start()].strip())
-            execution = resolve_direction(normalized, provider_name)
-            if execution.native_tags:
-                native_tags.extend(execution.native_tags)
-                return f"[{normalized}]"
-
-            if is_supported_direction(normalized, provider_name):
-                emotion = normalized
-                direction = normalized
-                provider_instruct = execution.provider_instruct
-                instruct = provider_instruct
-                speed = execution.speed
-                volume = execution.volume
-                pause_after = max(pause_after, execution.pause_after_ms)
-                take_count = execution.take_count
-                return ""
-
-            compound = normalized.split()
-            compound_execution = resolve_direction(compound[0], provider_name) if compound else None
-            if compound and is_supported_direction(compound[0], provider_name) and not compound_execution.native_tags:
-                emotion = compound[0]
-                direction = compound[0]
-                provider_instruct = compound_execution.provider_instruct
-                instruct = provider_instruct
-                speed = compound_execution.speed
-                volume = compound_execution.volume
-                pause_after = max(pause_after, compound_execution.pause_after_ms)
-                take_count = compound_execution.take_count
-                for option in compound[1:]:
-                    option_speed = _SPEED_PATTERN.match(option)
-                    option_pause = _PAUSE_PATTERN.match(option)
-                    option_duration = _DURATION_PATTERN.match(option)
-                    option_voice = _VOICE_PATTERN.match(option)
-                    if option_speed:
-                        speed = float(option_speed.group(1))
-                    elif option_pause:
-                        pause_after = max(pause_after, int(option_pause.group(1)))
-                    elif option_duration:
-                        duration = float(option_duration.group(1))
-                    elif option_voice:
-                        voice_id = option_voice.group(1)
-                    else:
-                        unknown_tags.append(option)
-                return ""
-
-            speed_match = _SPEED_PATTERN.match(normalized)
-            if speed_match:
-                speed = float(speed_match.group(1))
-                return ""
-
             pause_match = _PAUSE_PATTERN.match(normalized)
             if pause_match:
                 pause_ms = int(pause_match.group(1))
-                if before_text:
-                    pause_after = max(pause_after, pause_ms)
+                if current["text"].strip():
+                    current["explicit_pause_after"] = max(current["explicit_pause_after"], pause_ms)
                 else:
-                    pause_before = max(pause_before, pause_ms)
-                return ""
-
-            duration_match = _DURATION_PATTERN.match(normalized)
-            if duration_match:
-                duration = float(duration_match.group(1))
-                return ""
-
-            voice_match = _VOICE_PATTERN.match(normalized)
-            if voice_match:
-                voice_id = voice_match.group(1)
-                return ""
-
-            unknown_tags.append(raw_tag)
-            return match.group(0)
-
-        text = _TAG_PATTERN.sub(replace_tag, line).strip()
-        if not text:
-            pause_only = _PAUSE_PATTERN.fullmatch(line.strip("[] "))
-            if pause_only:
-                pending_pause_before += int(pause_only.group(1))
-            continue
-
-        if unknown_tags:
-            warnings.append("Unknown studio tags kept in text: " + ", ".join(unknown_tags))
-        if dialogue and speaker is None:
-            warnings.append("Dialogue line has no speaker prefix and requires a voice assignment.")
-        if direction:
-            warnings.append("Studio direction is best-effort; the reference voice remains dominant.")
-        segments.append(
-            ScriptSegment(
-                id=f"segment-{len(segments) + 1:02d}",
-                text=text,
-                speaker=speaker,
-                voice_id=voice_id,
-                emotion=emotion,
-                direction=direction,
-                instruct=instruct,
-                provider_instruct=provider_instruct,
-                speed=speed,
-                duration=duration,
-                pause_before_ms=pending_pause_before + pause_before,
-                pause_after_ms=pause_after,
-                volume=volume,
-                inference_quality="Balanced",
-                guidance=2.0,
-                take_count=take_count,
-                native_tags=tuple(native_tags),
-                warnings=tuple(warnings),
-            )
-        )
-        pending_pause_before = 0
+                    pending_pause_before += pause_ms
+                cursor = match.end()
+                continue
+            execution = resolve_direction(normalized, provider_name)
+            if execution.native_tags:
+                emit(internal_boundary=True)
+                current = new_state(native_tag=normalized)
+                current["text"] = f"[{normalized}]"
+            elif is_supported_direction(normalized, provider_name):
+                emit(internal_boundary=True)
+                current = new_state(direction=normalized)
+            else:
+                parts = normalized.split()
+                if parts and is_supported_direction(parts[0], provider_name) and not resolve_direction(parts[0], provider_name).native_tags:
+                    emit(internal_boundary=True)
+                    current = new_state(direction=parts[0])
+                    apply_options(parts[1:])
+                elif _SPEED_PATTERN.match(normalized):
+                    current["speed"] = float(_SPEED_PATTERN.match(normalized).group(1))
+                elif _DURATION_PATTERN.match(normalized):
+                    current["duration"] = float(_DURATION_PATTERN.match(normalized).group(1))
+                elif _VOICE_PATTERN.match(normalized):
+                    current["voice_id"] = _VOICE_PATTERN.match(normalized).group(1)
+                else:
+                    current["text"] += match.group(0)
+                    current["warnings"].append(f"Unknown studio tag kept in text: {raw_tag}")
+            cursor = match.end()
+        current["text"] += content[cursor:]
+        emit(internal_boundary=False)
 
     if segments and pending_pause_before:
         last = segments[-1]
-        segments[-1] = ScriptSegment(
-            **{
-                **last.to_dict(),
-                "pause_after_ms": max(last.pause_after_ms, pending_pause_before),
-                "native_tags": tuple(last.native_tags),
-                "warnings": tuple(last.warnings),
-            }
-        )
+        segments[-1] = ScriptSegment(**{**last.to_dict(), "pause_after_ms": max(last.pause_after_ms, pending_pause_before), "native_tags": tuple(last.native_tags), "warnings": tuple(last.warnings)})
     return segments
