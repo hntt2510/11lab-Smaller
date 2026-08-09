@@ -477,15 +477,21 @@ function App() {
     if (!voice?.reference_audio) throw new Error("No usable voice is assigned");
     const requestSnapshot = {
       text: segment.text, voice_id: voice.id, ref_audio: voice.reference_audio,
-      ref_text: voice.reference_transcript ?? null, instruct: segment.instruct,
+      ref_text: voice.reference_transcript ?? null,
+      direction: segment.direction ?? segment.emotion ?? null,
+      emotion: segment.emotion ?? null,
+      native_tags: segment.native_tags,
+      provider_instruct: segment.provider_instruct ?? segment.instruct ?? null,
       duration: segment.duration, speed: segment.speed,
+      pause_before_ms: segment.pause_before_ms, pause_after_ms: segment.pause_after_ms,
+      volume: segment.volume, guidance: segment.guidance,
       options: { num_step: 32, guidance_scale: segment.guidance, postprocess_output: true },
     };
     const generated = await client.generate({
       text: segment.text,
       ref_audio: voice.reference_audio,
       ref_text: voice.reference_transcript ?? undefined,
-      instruct: segment.instruct ?? undefined,
+      instruct: segment.provider_instruct ?? segment.instruct ?? undefined,
       duration: segment.duration ?? undefined,
       speed: segment.speed,
       options: requestSnapshot.options,
@@ -973,7 +979,7 @@ function StudioInspector({ renderStatus, onGenerate, selectedSegment, selectedVo
     <div className="inspector-scroll">
       <div className="selection-label"><span className="selection-number">{selectedSegment?.id.replace("segment-", "") ?? "--"}</span><div><span className="tiny-label">SELECTED LINE</span><strong>{emotion} / {formatSegmentDuration(selectedSegment?.duration)}</strong></div></div>
       <div className="voice-select"><div className="voice-avatar">{selectedVoice?.name.slice(0, 2).toUpperCase() ?? "--"}</div><div><span className="tiny-label">VOICE PROFILE</span><strong>{voiceLabel}</strong></div><span className="select-chevron">v</span></div>
-      <div className="inspector-section"><div className="section-heading"><span>Direction</span><span className="unit-label">STUDIO PRESET</span></div><div className="emotion-grid">{presets ? Object.keys(presets).map((preset, index) => <button className={`emotion ${emotion === preset ? "active" : ""}`} key={preset} onClick={() => onApplyPreset(preset)} type="button" disabled={!selectedSegment}><span>{String(index + 1).padStart(2, "0")}</span>{preset}</button>) : <span className="unit-label">Presets unavailable</span>}</div><small>{selectedSegment?.instruct ? `Provider instruct: ${selectedSegment.instruct}` : "Studio direction only; no provider instruct"}</small></div>
+      <div className="inspector-section"><div className="section-heading"><span>Direction</span><span className="unit-label">STUDIO PRESET</span></div><div className="emotion-grid">{presets ? Object.keys(presets).map((preset, index) => <button className={`emotion ${emotion === preset ? "active" : ""}`} key={preset} onClick={() => onApplyPreset(preset)} type="button" disabled={!selectedSegment}><span>{String(index + 1).padStart(2, "0")}</span>{preset}</button>) : <span className="unit-label">Presets unavailable</span>}</div><small>{selectedSegment?.provider_instruct ?? selectedSegment?.instruct ? `Provider instruct: ${selectedSegment.provider_instruct ?? selectedSegment.instruct}` : "Studio direction only; no provider instruct"}</small></div>
       <div className="inspector-section sliders"><div className="section-heading"><span>Performance</span><span className="unit-label">{selectedSegment?.inference_quality ?? "Balanced"}</span></div><NumericField disabled={!selectedSegment} label="Speed" value={selectedSegment?.speed ?? null} min={0.01} step={0.01} onChange={(speed) => onUpdateSegment({ speed: speed as number })} /><NumericField disabled={!selectedSegment} label="Duration" value={selectedSegment?.duration ?? null} min={0.01} step={0.1} nullable onChange={(duration) => onUpdateSegment({ duration })} /><NumericField disabled={!selectedSegment} label="Guidance" value={selectedSegment?.guidance ?? null} min={0} step={0.01} onChange={(guidance) => onUpdateSegment({ guidance: guidance as number })} /><NumericField disabled={!selectedSegment} label="Pause before" value={selectedSegment?.pause_before_ms ?? null} min={0} step={1} integer onChange={(pause_before_ms) => onUpdateSegment({ pause_before_ms: pause_before_ms as number })} /><NumericField disabled={!selectedSegment} label="Pause after" value={selectedSegment?.pause_after_ms ?? null} min={0} step={1} integer onChange={(pause_after_ms) => onUpdateSegment({ pause_after_ms: pause_after_ms as number })} /><NumericField disabled={!selectedSegment} label="Volume" value={selectedSegment?.volume ?? null} min={0} step={0.01} onChange={(volume) => onUpdateSegment({ volume: volume as number })} /></div>
       <div className="instruct-note"><span className="note-symbol">i</span><p>{selectedSegment?.warnings.length ? selectedSegment.warnings.join(" / ") : "Studio tags are best-effort direction. The reference voice still leads the performance."}</p></div>
       <button className={`inspector-generate ${renderStatus === "rendering" ? "busy" : ""}`} onClick={onGenerate} type="button"><span>{renderStatus === "rendering" ? "Rendering take..." : "Generate new take"}</span><span>-&gt;</span></button>

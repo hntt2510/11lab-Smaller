@@ -32,7 +32,8 @@ from .services.pronunciation_service import (
 )
 from .services.project_store import ProjectStore
 from .services.reference_analyzer import analyze_reference
-from .services.script_director import STUDIO_PRESETS, parse_script
+from .services.direction_resolver import studio_presets
+from .services.script_director import parse_script
 
 logger = logging.getLogger(__name__)
 
@@ -288,12 +289,13 @@ def create_app(
         )
 
     @app.post("/script/parse", dependencies=[Depends(require_token)])
-    def parse_script_route(payload: ScriptParseRequest) -> dict[str, Any]:
+    def parse_script_route(payload: ScriptParseRequest, request: Request) -> dict[str, Any]:
         try:
             segments = parse_script(
                 payload.source,
                 payload.default_voice_id,
                 dialogue=payload.mode == "dialogue",
+                provider_name=request.app.state.provider.name,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -303,8 +305,8 @@ def create_app(
         }
 
     @app.get("/script/presets", dependencies=[Depends(require_token)])
-    def script_presets() -> dict[str, dict[str, Any]]:
-        return {name: dict(values) for name, values in STUDIO_PRESETS.items()}
+    def script_presets(request: Request) -> dict[str, dict[str, Any]]:
+        return studio_presets(request.app.state.provider.name)
 
     @app.post("/references/analyze", dependencies=[Depends(require_token)])
     def analyze_reference_route(payload: ReferenceAnalyzeRequest) -> dict[str, Any]:

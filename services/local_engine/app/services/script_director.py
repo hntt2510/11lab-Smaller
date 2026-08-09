@@ -6,57 +6,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .direction_resolver import is_supported_direction, resolve_direction, studio_presets
 
-NATIVE_TAGS = frozenset(
-    {
-        "laughter",
-        "sigh",
-        "confirmation-en",
-        "question-en",
-        "question-ah",
-        "question-oh",
-        "question-ei",
-        "question-yi",
-        "surprise-ah",
-        "surprise-oh",
-        "surprise-wa",
-        "surprise-yo",
-        "dissatisfaction-hnn",
-    }
-)
-
-STUDIO_PRESETS: dict[str, dict[str, Any]] = {
-    "calm": {
-        "speed": 0.92,
-        "pause_after_ms": 280,
-        "take_count": 1,
-    },
-    "excited": {
-        "speed": 1.05,
-        "pause_after_ms": 120,
-        "take_count": 2,
-    },
-    "sad": {"speed": 0.88, "pause_after_ms": 300, "take_count": 1},
-    "serious": {
-        "speed": 0.94,
-        "pause_after_ms": 220,
-        "take_count": 1,
-    },
-    "whisper": {
-        "speed": 0.94,
-        "volume": 0.86,
-        "pause_after_ms": 260,
-        "take_count": 1,
-        "instruct": "whisper",
-    },
-    "slow": {"speed": 0.82, "pause_after_ms": 350, "take_count": 1},
-    "fast": {"speed": 1.12, "pause_after_ms": 90, "take_count": 1},
-    "emphasis": {
-        "speed": 1.0,
-        "pause_after_ms": 180,
-        "take_count": 2,
-    },
-}
+# Kept as an API compatibility alias; all values are resolved centrally.
+STUDIO_PRESETS = studio_presets()
 
 _TAG_PATTERN = re.compile(r"\[([^\]]+)\]")
 _SPEED_PATTERN = re.compile(r"^speed\s*=\s*(0?\.\d+|\d+(?:\.\d+)?)$", re.I)
@@ -77,7 +30,9 @@ class ScriptSegment:
     speaker: str | None = None
     voice_id: str | None = None
     emotion: str | None = None
+    direction: str | None = None
     instruct: str | None = None
+    provider_instruct: str | None = None
     speed: float = 1.0
     duration: float | None = None
     pause_before_ms: int = 0
@@ -99,7 +54,9 @@ class ScriptSegment:
             "speaker": self.speaker,
             "voice_id": self.voice_id,
             "emotion": self.emotion,
+            "direction": self.direction,
             "instruct": self.instruct,
+            "provider_instruct": self.provider_instruct,
             "speed": self.speed,
             "duration": self.duration,
             "pause_before_ms": self.pause_before_ms,
@@ -120,6 +77,7 @@ def parse_script(
     source: str,
     default_voice_id: str | None = None,
     dialogue: bool = False,
+    provider_name: str = "omnivoice",
 ) -> list[ScriptSegment]:
     """Parse one segment per non-empty line, preserving native model tags."""
 
@@ -141,10 +99,13 @@ def parse_script(
                 line = speaker_match.group("text").strip()
 
         emotion: str | None = None
+        direction: str | None = None
         instruct: str | None = None
+        provider_instruct: str | None = None
         speed = 1.0
         duration: float | None = None
         volume = 1.0
+        take_count = 1
         pause_before = 0
         pause_after = 0
         voice_id = default_voice_id
@@ -153,36 +114,39 @@ def parse_script(
         unknown_tags: list[str] = []
 
         def replace_tag(match: re.Match[str]) -> str:
-            nonlocal emotion, instruct, speed, duration, volume
+            nonlocal emotion, direction, instruct, provider_instruct, speed, duration, volume, take_count
             nonlocal pause_before, pause_after, voice_id
 
             raw_tag = match.group(1).strip()
             normalized = raw_tag.lower()
             before_text = bool(line[: match.start()].strip())
-            if normalized in NATIVE_TAGS:
-                native_tags.append(normalized)
+            execution = resolve_direction(normalized, provider_name)
+            if execution.native_tags:
+                native_tags.extend(execution.native_tags)
                 return f"[{normalized}]"
 
-            preset = STUDIO_PRESETS.get(normalized)
-            if preset is not None:
+            if is_supported_direction(normalized, provider_name):
                 emotion = normalized
-                instruct = preset.get("instruct", instruct)
-                speed = float(preset.get("speed", speed))
-                volume = float(preset.get("volume", volume))
-                pause_after = max(pause_after, int(preset.get("pause_after_ms", 0)))
+                direction = normalized
+                provider_instruct = execution.provider_instruct
+                instruct = provider_instruct
+                speed = execution.speed
+                volume = execution.volume
+                pause_after = max(pause_after, execution.pause_after_ms)
+                take_count = execution.take_count
                 return ""
 
             compound = normalized.split()
-            compound_preset = STUDIO_PRESETS.get(compound[0]) if compound else None
-            if compound_preset is not None:
+            compound_execution = resolve_direction(compound[0], provider_name) if compound else None
+            if compound and is_supported_direction(compound[0], provider_name) and not compound_execution.native_tags:
                 emotion = compound[0]
-                instruct = compound_preset.get("instruct", instruct)
-                speed = float(compound_preset.get("speed", speed))
-                volume = float(compound_preset.get("volume", volume))
-                pause_after = max(
-                    pause_after,
-                    int(compound_preset.get("pause_after_ms", 0)),
-                )
+                direction = compound[0]
+                provider_instruct = compound_execution.provider_instruct
+                instruct = provider_instruct
+                speed = compound_execution.speed
+                volume = compound_execution.volume
+                pause_after = max(pause_after, compound_execution.pause_after_ms)
+                take_count = compound_execution.take_count
                 for option in compound[1:]:
                     option_speed = _SPEED_PATTERN.match(option)
                     option_pause = _PAUSE_PATTERN.match(option)
@@ -238,10 +202,8 @@ def parse_script(
             warnings.append("Unknown studio tags kept in text: " + ", ".join(unknown_tags))
         if dialogue and speaker is None:
             warnings.append("Dialogue line has no speaker prefix and requires a voice assignment.")
-        if emotion in {"excited", "whisper"}:
+        if direction:
             warnings.append("Studio direction is best-effort; the reference voice remains dominant.")
-
-        preset = STUDIO_PRESETS.get(emotion or "", {})
         segments.append(
             ScriptSegment(
                 id=f"segment-{len(segments) + 1:02d}",
@@ -249,7 +211,9 @@ def parse_script(
                 speaker=speaker,
                 voice_id=voice_id,
                 emotion=emotion,
+                direction=direction,
                 instruct=instruct,
+                provider_instruct=provider_instruct,
                 speed=speed,
                 duration=duration,
                 pause_before_ms=pending_pause_before + pause_before,
@@ -257,7 +221,7 @@ def parse_script(
                 volume=volume,
                 inference_quality="Balanced",
                 guidance=2.0,
-                take_count=int(preset.get("take_count", 1)),
+                take_count=take_count,
                 native_tags=tuple(native_tags),
                 warnings=tuple(warnings),
             )

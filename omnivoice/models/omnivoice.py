@@ -1414,11 +1414,9 @@ def _get_time_steps(
     return timesteps
 
 
-_NONVERBAL_PATTERN = re.compile(
-    r"\[(laughter|sigh|confirmation-en|question-en|question-ah|question-oh|"
-    r"question-ei|question-yi|surprise-ah|surprise-oh|surprise-wa|"
-    r"surprise-yo|dissatisfaction-hnn)\]"
-)
+from omnivoice.utils.acoustic_tags import OMNIVOICE_NATIVE_ACOUSTIC_TAGS
+
+_NONVERBAL_PATTERN = re.compile(r"\[(" + "|".join(OMNIVOICE_NATIVE_ACOUSTIC_TAGS) + r")\]")
 
 
 def _tokenize_with_nonverbal_tags(text: str, tokenizer) -> torch.Tensor:

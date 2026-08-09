@@ -61,7 +61,9 @@ export function applyStudioPresetToSegment(
   return {
     ...segment,
     emotion,
+    direction: emotion,
     instruct: preset.instruct ?? null,
+    provider_instruct: preset.provider_instruct ?? preset.instruct ?? null,
     ...(preset.speed !== undefined ? { speed: preset.speed } : {}),
     ...(preset.volume !== undefined ? { volume: preset.volume } : {}),
     ...(preset.pause_after_ms !== undefined ? { pause_after_ms: preset.pause_after_ms } : {}),

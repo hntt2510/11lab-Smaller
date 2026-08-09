@@ -205,7 +205,7 @@ class ProviderContractTest(unittest.TestCase):
     def test_studio_presets_keep_emotion_without_unsupported_instruct(self):
         expected = {
             "calm": 0.92,
-            "excited": 1.05,
+            "excited": 1.08,
             "sad": 0.88,
             "serious": 0.94,
             "emphasis": 1.0,
@@ -239,8 +239,38 @@ class ProviderContractTest(unittest.TestCase):
         self.assertEqual(segment.instruct, "whisper")
         self.assertEqual(segment.speed, 0.83)
 
+    def test_direction_engine_resolves_emotions_reactions_and_unknown_tags_per_line(self):
+        segments = parse_script(
+            "A: [calm] Bình tĩnh nào.\n"
+            "B: [excited] Ủa! Thiệt luôn hả?\n"
+            "A: [whisper] Ê... nhỏ tiếng thôi.\n"
+            "B: [laughter] Hahaha, ông nói thật à?\n"
+            "A: [terrified] À... ừm... tôi cũng không biết nữa.",
+            dialogue=True,
+        )
+
+        self.assertEqual([segment.speaker for segment in segments], ["A", "B", "A", "B", "A"])
+        self.assertEqual([segment.direction for segment in segments[:3]], ["calm", "excited", "whisper"])
+        self.assertEqual([segment.provider_instruct for segment in segments[:3]], [None, None, "whisper"])
+        self.assertEqual(segments[1].speed, 1.08)
+        self.assertEqual(segments[3].native_tags, ("laughter",))
+        self.assertIn("[laughter]", segments[3].text)
+        self.assertIn("À... ừm...", segments[4].text)
+        self.assertIn("[terrified]", segments[4].text)
+        self.assertTrue(any("Unknown studio tags" in warning for warning in segments[4].warnings))
+
+    def test_direction_engine_supports_all_studio_fallbacks_without_provider_instruct(self):
+        for direction in ("calm", "excited", "sad", "serious", "happy", "angry", "nervous", "curious", "slow", "fast", "emphasis"):
+            segment = parse_script(f"[{direction}] Hello.")[0]
+            self.assertEqual(segment.direction, direction)
+            self.assertIsNone(segment.provider_instruct)
+            if direction == "emphasis":
+                self.assertEqual(segment.take_count, 2)
+            else:
+                self.assertNotEqual(segment.speed, 1.0)
+
     def test_studio_preset_api_matches_parser_metadata(self):
-        client = TestClient(create_app(FakeProvider(), token="secret"))
+        client = TestClient(create_app(OmniVoiceProvider(), token="secret"))
         response = client.get(
             "/script/presets", headers={"Authorization": "Bearer secret"}
         )

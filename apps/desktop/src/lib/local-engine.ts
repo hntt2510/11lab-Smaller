@@ -22,7 +22,9 @@ export type ScriptSegment = {
   speaker?: string | null;
   voice_id?: string | null;
   emotion?: string | null;
+  direction?: string | null;
   instruct?: string | null;
+  provider_instruct?: string | null;
   speed: number;
   duration?: number | null;
   pause_before_ms: number;
@@ -44,6 +46,7 @@ export type StudioPreset = {
   pause_after_ms?: number;
   take_count?: number;
   instruct?: string;
+  provider_instruct?: string | null;
 };
 
 export type VoiceProfile = {
