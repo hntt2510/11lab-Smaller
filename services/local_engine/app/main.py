@@ -630,7 +630,7 @@ def create_app(
                 )
                 for segment in payload.segments
             ]
-            output_name = payload.output_filename or f"full-script-{secrets.token_hex(8)}.wav"
+            output_name = payload.output_filename or f"narration-{secrets.token_hex(8)}.wav"
             output_path = _resolve_workspace_path(workspace, output_name, ".wav")
             return assemble_audio(selected_segments, output_path).to_dict()
         except ValueError as exc:

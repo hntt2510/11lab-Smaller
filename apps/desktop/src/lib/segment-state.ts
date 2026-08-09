@@ -53,6 +53,10 @@ export function resolveFullScriptAssembly(
   return { segments: assemblySegments, sourceTakeIds, missingSegmentIds };
 }
 
+export function resolveDialogueOutputs(segments: ScriptSegment[], takes: Take[]): Array<{ segment: ScriptSegment; take: Take | null }> {
+  return segments.map((segment) => ({ segment, take: resolveSelectedTake(segment, takes) }));
+}
+
 export function applyStudioPresetToSegment(
   segment: ScriptSegment,
   emotion: string,

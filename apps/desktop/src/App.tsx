@@ -13,7 +13,7 @@ import {
   getLocalEngineClient,
 } from "./lib/local-engine";
 import type { AudioEditOptions } from "./lib/local-engine";
-import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./lib/segment-state";
+import { applyStudioPresetToSegment, type EditableSegmentPatch, resolveDialogueOutputs, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./lib/segment-state";
 import { WaveformEditor } from "./components/WaveformEditor";
 
 gsap.registerPlugin(useGSAP);
@@ -300,7 +300,8 @@ function App() {
   const fullScriptSignature = fullScriptAssembly.segments
     .map((segment, index) => `${fullScriptAssembly.sourceTakeIds[index]}:${segment.audio_path}:${segment.pause_before_ms}:${segment.pause_after_ms}`)
     .join("|");
-  const isFullScriptCurrent = fullScript.status === "ready"
+  const isFullScriptCurrent = generationMode === "single_narrator"
+    && fullScript.status === "ready"
     && fullScript.sourceTakeIds.join("|") === fullScriptAssembly.sourceTakeIds.join("|")
     && fullScriptAssembly.missingSegmentIds.length === 0;
   const fullScriptAudioUrl = isFullScriptCurrent ? fullScript.audioUrl : null;
@@ -342,11 +343,15 @@ function App() {
 
   useEffect(() => {
     const client = getLocalEngineClient();
+    if (generationMode !== "single_narrator") {
+      setFullScript(initialFullScriptState);
+      return;
+    }
     if (fullScriptAssembly.missingSegmentIds.length) {
       setFullScript({
         ...initialFullScriptState,
         status: "unavailable",
-        message: `Full preview unavailable: ${fullScriptAssembly.missingSegmentIds.join(", ")} has no selected Take.`,
+        message: `Narration incomplete: ${fullScriptAssembly.missingSegmentIds.join(", ")} needs generation.`,
       });
       return;
     }
@@ -373,12 +378,12 @@ function App() {
         });
       })
       .catch(() => {
-        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: "Full script assembly failed." });
+        if (!cancelled) setFullScript({ ...initialFullScriptState, status: "error", message: "Narration assembly failed." });
       });
     return () => {
       cancelled = true;
     };
-  }, [fullScriptSignature, fullScriptAssembly.missingSegmentIds.join("|")]);
+  }, [generationMode, fullScriptSignature, fullScriptAssembly.missingSegmentIds.join("|")]);
 
   const dialogueSpeakers = Array.from(new Set(
     scriptSegments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
@@ -394,7 +399,7 @@ function App() {
   });
 
   const selectTake = contextSafe((take: Take) => {
-    if (take.segment_id !== selectedSegmentId) return;
+    setSelectedSegmentId(take.segment_id);
     setScriptSegments((current) => selectTakeForSegment(current, take.segment_id, take.id));
   });
 
@@ -426,6 +431,12 @@ function App() {
       { autoAlpha: 0, y: 10 },
       { autoAlpha: 1, y: 0, duration: 0.34, ease: "power2.out", overwrite: true },
     );
+  });
+
+  const changeGenerationMode = contextSafe((mode: GenerationMode) => {
+    setGenerationMode(mode);
+    setFullScript(initialFullScriptState);
+    setToast("Mode changed. Parse the source to apply it.");
   });
 
   const parseDraft = contextSafe(async () => {
@@ -559,7 +570,7 @@ function App() {
       }
     }
     setGenerateAllProgress(null);
-    setToast(failed ? `${completed} generated, ${failed} failed` : `${completed} lines generated`);
+    setToast(failed ? `${completed} generated, ${failed} failed` : generationMode === "dialogue" ? `${completed} outputs ready` : `${completed} lines generated`);
   });
 
   const processAudioEdit = contextSafe(async (options: Omit<AudioEditOptions, "source_path">) => {
@@ -629,10 +640,24 @@ function App() {
       return;
     }
     try {
-      downloadBlob(await client.fetchAudio(fullScript.outputPath), "full-script.wav");
-      setToast("Full script WAV downloaded");
+      downloadBlob(await client.fetchAudio(fullScript.outputPath), "narration.wav");
+      setToast("Narration WAV downloaded");
     } catch {
       setToast("Full script WAV export failed");
+    }
+  });
+
+  const exportDialogueTakeWav = contextSafe(async (take: Take) => {
+    const client = getLocalEngineClient();
+    if (!client) {
+      setToast("Connect the local engine to export this utterance");
+      return;
+    }
+    try {
+      downloadBlob(await client.fetchAudio(take.output_path), `${take.segment_id}.wav`);
+      setToast("Utterance WAV downloaded");
+    } catch {
+      setToast("Utterance WAV export failed");
     }
   });
 
@@ -731,9 +756,9 @@ function App() {
             </div>
             <div className="hero-actions">
               <button className="outline-button" type="button" onClick={saveProject}>Save project</button>
-              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress) || fullScript.status === "assembling"}>
+              <button className="primary-button" type="button" onClick={generateAll} disabled={Boolean(generateAllProgress) || (generationMode === "single_narrator" && fullScript.status === "assembling")}>
                 <span className="button-spark">+</span>
-                {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : fullScript.status === "assembling" ? "Assembling full script" : "Generate all"}
+                {generateAllProgress ? `Generating ${generateAllProgress.current} / ${generateAllProgress.total}` : generationMode === "single_narrator" && fullScript.status === "assembling" ? "Assembling narration" : "Generate all"}
               </button>
             </div>
           </section>
@@ -756,8 +781,8 @@ function App() {
               speakerVoiceMap={speakerVoiceMap}
               selectedNarratorVoiceId={selectedNarratorVoiceId}
               voices={voiceProfiles}
-              isGeneratingAll={Boolean(generateAllProgress) || fullScript.status === "assembling"}
-              onModeChange={(mode) => { setGenerationMode(mode); setToast("Mode changed. Parse the source to apply it."); }}
+              isGeneratingAll={Boolean(generateAllProgress) || (generationMode === "single_narrator" && fullScript.status === "assembling")}
+              onModeChange={changeGenerationMode}
               onSpeakerVoiceChange={(speaker, voiceId) => setSpeakerVoiceMap((current) => ({ ...current, [speaker]: voiceId }))}
               onNarratorVoiceChange={selectVoice}
               onGenerateAll={generateAll}
@@ -768,6 +793,9 @@ function App() {
               fullScriptAudioUrl={fullScriptAudioUrl}
               fullPreviewSeekRequest={fullPreviewSeekRequest}
               onExportFullScriptWav={exportFullScriptWav}
+              takes={takes}
+              onSelectTake={selectTake}
+              onExportDialogueTakeWav={exportDialogueTakeWav}
             />
           ) : (
             <OverviewView
@@ -834,6 +862,9 @@ function StudioView({
   fullScriptAudioUrl,
   fullPreviewSeekRequest,
   onExportFullScriptWav,
+  takes,
+  onSelectTake,
+  onExportDialogueTakeWav,
 }: {
   onSelect: (id: string) => void;
   selectedSegmentId: string | null;
@@ -863,6 +894,9 @@ function StudioView({
   fullScriptAudioUrl: string | null;
   fullPreviewSeekRequest: { id: number; seconds: number } | null;
   onExportFullScriptWav: () => void;
+  takes: Take[];
+  onSelectTake: (take: Take) => void;
+  onExportDialogueTakeWav: (take: Take) => void;
 }) {
   return (
     <div className="studio-grid">
@@ -911,6 +945,13 @@ function StudioView({
         <div className="board-note"><span className="note-pin" />Reference voice is strongest when the line stays under 10 seconds.</div>
       </section>
 
+      {generationMode === "single_narrator" && <FullScriptPreview
+        fullScript={fullScript}
+        audioUrl={fullScriptAudioUrl}
+        seekRequest={fullPreviewSeekRequest}
+        onExportWav={onExportFullScriptWav}
+      />}
+      {generationMode === "dialogue" && <DialogueOutputs segments={segments} takes={takes} onSelectTake={onSelectTake} onExportWav={onExportDialogueTakeWav} />}
       <section className="transport-panel reveal-card">
         <div className="transport-topline">
           <div><span className="tiny-label">TIMELINE</span><strong>Take B / Natural</strong></div>
@@ -933,24 +974,30 @@ function StudioView({
         </div>
         <div className="render-meter" />
       </section>
-      <FullScriptPreview
-        fullScript={fullScript}
-        audioUrl={fullScriptAudioUrl}
-        seekRequest={fullPreviewSeekRequest}
-        onExportWav={onExportFullScriptWav}
-      />
     </div>
   );
 }
 
+function DialogueOutputs({ segments, takes, onSelectTake, onExportWav }: { segments: ScriptSegment[]; takes: Take[]; onSelectTake: (take: Take) => void; onExportWav: (take: Take) => void }) {
+  return <section className="dialogue-outputs reveal-card">
+    <div className="full-script-head"><div><span className="tiny-label">PRIMARY OUTPUT / DIALOGUE</span><strong>Utterance outputs</strong></div><span className="unit-label">{segments.length} lines</span></div>
+    <div className="dialogue-output-list">{resolveDialogueOutputs(segments, takes).map(({ segment, take }, index) => {
+      return <div className={`dialogue-output-row ${take ? "ready" : "missing"}`} key={segment.id}>
+        <span>{String(index + 1).padStart(2, "0")}</span><div><strong>{segment.speaker ?? "Unassigned"}</strong><small>{segment.text}</small></div>
+        {take ? <><button type="button" onClick={() => onSelectTake(take)}>Play</button><button type="button" onClick={() => onExportWav(take)}>WAV</button></> : <em>{segment.render_status === "failed" ? "Failed" : "Missing"}</em>}
+      </div>;
+    })}</div>
+  </section>;
+}
+
 function FullScriptPreview({ fullScript, audioUrl, seekRequest, onExportWav }: { fullScript: FullScriptState; audioUrl: string | null; seekRequest: { id: number; seconds: number } | null; onExportWav: () => void }) {
   const status = fullScript.status === "assembling"
-    ? "Assembling full script"
+    ? "Assembling narration"
     : fullScript.status === "ready" && audioUrl
-      ? "Full preview ready"
-      : fullScript.message ?? "Generate every line to create a full preview.";
+      ? "Narration ready"
+      : fullScript.message ?? "Generate every line to create a full narration.";
   return <section className="full-script-panel reveal-card">
-    <div className="full-script-head"><div><span className="tiny-label">TIMELINE / FULL SCRIPT</span><strong>Full Script Preview</strong></div><span className={`render-state ${fullScript.status === "assembling" ? "rendering" : audioUrl ? "complete" : ""}`}><i />{status}</span></div>
+    <div className="full-script-head"><div><span className="tiny-label">PRIMARY OUTPUT / SINGLE NARRATOR</span><strong>Full Narration</strong></div><span className={`render-state ${fullScript.status === "assembling" ? "rendering" : audioUrl ? "complete" : ""}`}><i />{status}</span></div>
     {audioUrl ? <>
       <WaveformEditor audioUrl={audioUrl} readOnly seekRequest={seekRequest} onExportWav={onExportWav} />
       <div className="full-script-meta"><span>{`00:00 / ${formatSegmentDuration(fullScript.duration)}`}</span><span>{`Generated from: ${fullScript.sourceTakeIds.length} / ${fullScript.timeline.length} selected lines`}</span></div>

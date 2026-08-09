@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ScriptSegment, Take } from "./local-engine";
-import { applyStudioPresetToSegment, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./segment-state";
+import { applyStudioPresetToSegment, resolveDialogueOutputs, resolveFullScriptAssembly, resolveSelectedTake, resolveSegmentVoiceId, selectTakeForSegment, updateSegmentById } from "./segment-state";
 
 function segment(id: string): ScriptSegment {
   return {
@@ -112,5 +112,24 @@ describe("canonical Studio segment state", () => {
     expect(resolveFullScriptAssembly(initial, [takeA, takeB]).sourceTakeIds).toEqual(["take-a"]);
     expect(resolveFullScriptAssembly(rebuilt, [takeA, takeB]).sourceTakeIds).toEqual(["take-b"]);
     expect(resolveFullScriptAssembly(rebuilt, [takeA, takeB]).segments[0].audio_path).toBe("file-B.wav");
+  });
+
+  it("keeps Dialogue primary outputs in script order and uses each selected take", () => {
+    const takeA1 = take("a-1", "segment-1", "a-1.wav");
+    const takeB2 = take("b-2", "segment-2", "b-2.wav");
+    const takeA3 = take("a-3", "segment-3", "a-3.wav");
+    const segments = selectTakeForSegment(
+      selectTakeForSegment(
+        selectTakeForSegment([{ ...segment("segment-1"), speaker: "A" }, { ...segment("segment-2"), speaker: "B" }, { ...segment("segment-3"), speaker: "A" }], "segment-1", takeA1.id),
+        "segment-2",
+        takeB2.id,
+      ),
+      "segment-3",
+      takeA3.id,
+    );
+
+    expect(resolveDialogueOutputs(segments, [takeA1, takeB2, takeA3]).map((output) => [output.segment.speaker, output.take?.output_path])).toEqual([
+      ["A", "a-1.wav"], ["B", "b-2.wav"], ["A", "a-3.wav"],
+    ]);
   });
 });
